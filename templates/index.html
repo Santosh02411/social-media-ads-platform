@@ -1,0 +1,310 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AdSync — Unified Social Media Ads Platform</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Space+Mono:ital,wght@0,400;0,700&family=DM+Sans:opsz,wght@9..40,300;9..40,400;9..40,500;9..40,600;9..40,700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+
+<!-- ══════════════════════════  HEADER  ══════════════════════════════════════ -->
+<header class="header">
+  <div class="header-inner">
+
+    <!-- Logo -->
+    <a class="logo" href="/">
+      <div class="logo-icon">⚡</div>
+      <span class="logo-text">AdSync</span>
+      <span class="logo-badge">BETA</span>
+    </a>
+
+    <!-- Nav -->
+    <nav class="tab-nav">
+      <button class="tab-btn active" data-tab="compose">✍️ Compose</button>
+      <button class="tab-btn" data-tab="schedule">🕐 Schedule</button>
+      <button class="tab-btn" data-tab="history">📋 History</button>
+      <button class="tab-btn" data-tab="analytics">📊 Analytics</button>
+    </nav>
+
+    <!-- Right controls -->
+    <div class="header-right">
+      <div class="live-pill">
+        <span class="live-dot" id="liveDot"></span>
+        <span id="liveLabel" style="font-size:.88rem">Connecting…</span>
+      </div>
+      <span class="conn-badge" id="connCount">0 live</span>
+
+      <!-- Theme toggle -->
+      <div class="theme-toggle" role="group" aria-label="Switch theme">
+        <button class="theme-btn" data-theme="light" onclick="setTheme('light')" title="Light mode">☀️</button>
+        <button class="theme-btn active" data-theme="dark"  onclick="setTheme('dark')"  title="Dark mode">🌙</button>
+      </div>
+    </div>
+
+  </div>
+</header>
+
+<!-- ══════════════════════════  BODY  ════════════════════════════════════════ -->
+<div class="layout">
+
+  <!-- ══════════  SIDEBAR — PLATFORMS  ══════════════════════════════════════ -->
+  <aside class="sidebar">
+    <div class="sidebar-section-label">Platforms</div>
+    <div id="platformsList">
+      <!-- rendered by JS -->
+    </div>
+  </aside>
+
+  <!-- ══════════  MAIN CONTENT  ════════════════════════════════════════════ -->
+  <main class="content-area">
+
+    <!-- Active connections banner -->
+    <div class="connections-bar" id="connectionsBar">
+      <span class="connections-label">CONNECTED</span>
+      <div class="conn-chips" id="connChips">
+        <span class="no-conn-text">No platforms connected yet — connect one on the left</span>
+      </div>
+    </div>
+
+    <!-- ════════  COMPOSE TAB  ════════════════════════════════════════════ -->
+    <div class="tab-panel active" id="tab-compose">
+
+      <div class="card">
+        <div class="card-header">
+          <div class="card-title">
+            <div class="card-title-icon">✍️</div>
+            Compose Ad
+          </div>
+          <span class="card-subtitle">Text · Image · Video · Audio</span>
+        </div>
+        <div class="card-body">
+
+          <!-- Headline + CTA -->
+          <div class="field-row">
+            <div class="field" style="flex:2">
+              <label class="label">Ad Headline</label>
+              <input class="input" id="adTitle" type="text"
+                placeholder="e.g.  🚀 Summer Sale — 50% off everything">
+            </div>
+            <div class="field">
+              <label class="label">Call to Action</label>
+              <input class="input" id="adCta" type="text"
+                placeholder="Shop Now  ·  Sign Up Free">
+            </div>
+          </div>
+
+          <!-- Ad copy -->
+          <div class="field">
+            <label class="label">
+              Ad Copy
+              <span class="label-hint"><span id="charCount">0</span> characters</span>
+            </label>
+            <textarea class="textarea" id="adText" rows="5"
+              placeholder="Write compelling ad copy here. Be clear and action-oriented.&#10;&#10;Twitter auto-trims to 280 characters.  Instagram requires an image or video."></textarea>
+          </div>
+
+          <!-- Hashtags + URL -->
+          <div class="field-row">
+            <div class="field">
+              <label class="label">Hashtags</label>
+              <input class="input" id="adHashtags" type="text"
+                placeholder="marketing  launch  SaaS  (space or comma separated)">
+            </div>
+            <div class="field">
+              <label class="label">Destination URL</label>
+              <input class="input" id="adLink" type="url"
+                placeholder="https://yoursite.com">
+            </div>
+          </div>
+
+          <!-- Media Upload -->
+          <div class="field">
+            <label class="label">Media — Image · Video · Audio</label>
+            <div class="drop-zone" id="dropZone"
+                 onclick="document.getElementById('fileInput').click()">
+
+              <div id="dropPlaceholder">
+                <span class="drop-zone-icon">📎</span>
+                <div class="drop-zone-title">
+                  Drag & drop your media, or
+                  <button class="upload-link" onclick="event.stopPropagation();document.getElementById('fileInput').click()">
+                    browse files
+                  </button>
+                </div>
+                <div class="drop-zone-sub">
+                  Upload once — posts to all selected platforms automatically
+                </div>
+                <div class="drop-zone-types">
+                  <span class="drop-type-tag">🖼 JPG / PNG / GIF</span>
+                  <span class="drop-type-tag">🎬 MP4 / MOV / AVI</span>
+                  <span class="drop-type-tag">🎵 MP3 / WAV / OGG</span>
+                  <span class="drop-type-tag">Max 100 MB</span>
+                </div>
+              </div>
+
+              <div id="dropPreview" class="media-preview" style="display:none">
+                <button class="remove-media"
+                        onclick="event.stopPropagation();removeMedia()">✕ Remove</button>
+                <div id="previewWrap"></div>
+                <div id="previewMeta" style="font-family:var(--mono);font-size:.75rem;color:var(--text-muted);margin-top:8px"></div>
+              </div>
+
+            </div>
+
+            <input type="file" id="fileInput" style="display:none"
+              accept="image/jpeg,image/png,image/gif,image/webp,video/mp4,video/quicktime,video/avi,video/webm,audio/mpeg,audio/wav,audio/ogg,audio/webm">
+
+            <div class="upload-progress" id="uploadProgress" style="display:none">
+              <div class="progress-bar"><div class="progress-fill" id="progressFill"></div></div>
+              <span class="progress-text" id="progressText"></span>
+            </div>
+          </div>
+
+          <!-- Platform selector -->
+          <div class="field">
+            <label class="label">Post To</label>
+            <div class="platform-selector" id="platformSelector">
+              <span style="color:var(--text-muted);font-size:.9rem">Connect platforms in the sidebar first.</span>
+            </div>
+          </div>
+
+          <!-- Platform notes -->
+          <div id="platformNotes" style="display:none;background:var(--amber-dim);border:1px solid rgba(245,166,35,.25);border-radius:var(--radius-md);padding:12px 16px;font-size:.88rem;color:var(--amber);line-height:1.6"></div>
+
+          <!-- Publish -->
+          <button class="btn-publish" id="btnPublish" onclick="postAd()">
+            🚀 &nbsp; Publish to Selected Platforms
+          </button>
+
+        </div>
+      </div>
+
+    </div><!-- /compose -->
+
+    <!-- ════════  SCHEDULE TAB  ══════════════════════════════════════════════ -->
+    <div class="tab-panel" id="tab-schedule">
+
+      <div class="card">
+        <div class="card-header">
+          <div class="card-title"><div class="card-title-icon">🕐</div>Schedule Post</div>
+          <span class="card-subtitle">Scheduler checks every 10 seconds</span>
+        </div>
+        <div class="card-body">
+          <div class="field">
+            <label class="label">Date & Time</label>
+            <input class="input" id="scheduleAt" type="datetime-local" style="max-width:320px">
+            <span style="font-size:.85rem;color:var(--text-muted)">
+              Fill in the Compose tab first, then schedule here. Uses your browser's local timezone.
+            </span>
+          </div>
+          <button class="btn-secondary" onclick="scheduleAd()" style="max-width:280px">
+            🕐 &nbsp; Schedule This Post
+          </button>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-header">
+          <div class="card-title"><div class="card-title-icon">📋</div>Pending Posts</div>
+          <button class="btn-ghost" onclick="loadScheduled()">↻ Refresh</button>
+        </div>
+        <div class="history-feed" id="scheduledList">
+          <div class="empty-msg"><span class="empty-icon">🕐</span>No scheduled posts yet.</div>
+        </div>
+      </div>
+
+    </div><!-- /schedule -->
+
+    <!-- ════════  HISTORY TAB  ═══════════════════════════════════════════════ -->
+    <div class="tab-panel" id="tab-history">
+      <div class="card">
+        <div class="card-header">
+          <div class="card-title"><div class="card-title-icon">📋</div>Post History</div>
+          <button class="btn-ghost" onclick="loadHistory()">↻ Refresh</button>
+        </div>
+        <div class="history-feed" id="historyList">
+          <div class="empty-msg"><span class="empty-icon">📭</span>No posts yet. Publish your first ad above!</div>
+        </div>
+      </div>
+    </div><!-- /history -->
+
+    <!-- ════════  ANALYTICS TAB  ════════════════════════════════════════════ -->
+    <div class="tab-panel" id="tab-analytics">
+
+      <div class="stats-row">
+        <div class="stat-box s-total">
+          <div class="stat-num" id="sTotalPosts">—</div>
+          <div class="stat-desc">Total Posts</div>
+        </div>
+        <div class="stat-box s-ok">
+          <div class="stat-num" id="sSucceeded">—</div>
+          <div class="stat-desc">Succeeded</div>
+        </div>
+        <div class="stat-box s-fail">
+          <div class="stat-num" id="sFailed">—</div>
+          <div class="stat-desc">Failed</div>
+        </div>
+        <div class="stat-box s-sched">
+          <div class="stat-num" id="sScheduled">—</div>
+          <div class="stat-desc">Scheduled</div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-header">
+          <div class="card-title"><div class="card-title-icon">📊</div>Per-Platform Results</div>
+          <button class="btn-ghost" onclick="loadAnalytics()">↻ Refresh</button>
+        </div>
+        <div style="padding:16px;display:flex;flex-direction:column;gap:10px" id="platformStats">
+          <div class="empty-msg"><span class="empty-icon">📊</span>No data yet.</div>
+        </div>
+      </div>
+
+    </div><!-- /analytics -->
+
+  </main>
+</div>
+
+<!-- ══════════════════════  CONNECT MODAL  ════════════════════════════════════ -->
+<div class="modal-overlay" id="connectModal" style="display:none"
+     onclick="if(event.target===this)closeModal()">
+  <div class="modal">
+    <div class="modal-head">
+      <div class="modal-plat-icon" id="mIcon"></div>
+      <span class="modal-title" id="mTitle">Connect Platform</span>
+      <button class="modal-close" onclick="closeModal()">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="guide-box" id="mGuide"></div>
+      <div id="mFields"></div>
+      <div class="modal-error" id="mError" style="display:none"></div>
+    </div>
+    <div class="modal-foot">
+      <button class="btn-modal-cancel" onclick="closeModal()">Cancel</button>
+      <button class="btn-modal-connect" id="mConnBtn" onclick="submitConnect()">Connect</button>
+    </div>
+  </div>
+</div>
+
+<!-- ══════════════════════  POSTING OVERLAY  ══════════════════════════════════ -->
+<div class="post-overlay" id="postOverlay" style="display:none" onclick="if(event.target===this&&document.getElementById('btnCloseOverlay').style.display!=='none')closePostingOverlay()">
+  <div class="post-dialog">
+    <span class="post-spinner" id="postSpinner">⚡</span>
+    <div class="post-dialog-title" id="postDialogTitle">Publishing Ad…</div>
+    <div class="post-results" id="postResults"></div>
+    <button class="btn-secondary" id="btnCloseOverlay"
+            style="display:none;margin-top:22px" onclick="closePostingOverlay()">
+      Close
+    </button>
+  </div>
+</div>
+
+<!-- ══════════════════════  TOASTS  ══════════════════════════════════════════ -->
+<div class="toast-stack" id="toastStack"></div>
+
+<script src="/static/js/app.js"></script>
+</body>
+</html>
