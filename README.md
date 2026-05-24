@@ -1,169 +1,235 @@
 # ⚡ AdSync — Unified Social Media Ads Platform
 
-Post ads to **Facebook, Instagram, Twitter/X, LinkedIn, TikTok, and Pinterest** from a single Python/Flask dashboard.
-
-Supports **text, image, video, and audio** ads with real-time per-platform posting status.
+An AI-powered multi-platform social media advertising dashboard built with Python & Flask that allows users to create, publish, schedule, and monitor advertisements across multiple social media platforms from a single unified interface.
 
 ---
 
-## 📸 Features
+# 🚀 Features
 
-- ✅ Multi-platform ad publishing
-- ✅ Unified Flask dashboard
-- ✅ Real-time posting status updates
-- ✅ Image, video & audio uploads
-- ✅ Ad scheduling system
-- ✅ Platform connection management
-- ✅ Analytics & post history
-- ✅ Dark industrial UI design
-- ✅ REST API support
+### 🔐 Authentication & User Management
+
+- User Registration & Login
+- Secure Authentication System
+- Admin & User Roles
+- User Profile Management
+
+### 📱 Multi-Platform Integration
+
+- Facebook Ads Integration
+- Instagram Posting Support
+- Twitter/X API Integration
+- LinkedIn Ad Publishing
+- TikTok Content Posting
+- Pinterest Ad Publishing
+
+### 📤 Ad Publishing System
+
+- Text-based Ads
+- Image Ads
+- Video Ads
+- Audio Promotions
+- Multi-platform Publishing
+- Real-time Posting Status
+
+### 🕒 Smart Scheduling System
+
+- Future Ad Scheduling
+- Automatic Background Posting
+- Scheduled Campaign Management
+- Real-time Scheduler Monitoring
+
+### 📊 Analytics & Monitoring
+
+- Ad Publishing History
+- Platform-wise Status Tracking
+- Campaign Statistics
+- Performance Monitoring Dashboard
+
+### 📂 Media Management
+
+- Media Upload System
+- Image & Video Handling
+- Audio File Support
+- Secure File Storage
+
+### 🎨 UI/UX Features
+
+- Responsive Dashboard Interface
+- Dark Industrial Theme
+- Interactive Notifications
+- Real-time Event Updates
 
 ---
 
-# 📁 Project Structure
+# 🛠️ Tech Stack
+
+| Layer | Technologies Used |
+|-------|------------------|
+| Backend | Python, Flask |
+| Frontend | HTML5, CSS3, JavaScript |
+| Database | SQLite / MySQL |
+| APIs & Services | Facebook Graph API, Twitter API v2, LinkedIn API, TikTok API, Pinterest API |
+| Authentication | OAuth 2.0 |
+| Real-time Events | Flask Polling / Scheduler |
+
+---
+
+# 📂 Project Structure
 
 ```bash
 social-ads-platform/
 │
-├── app.py                      # Flask backend (routes, scheduler, real-time events)
+├── app.py                      # Flask backend
 ├── requirements.txt            # Python dependencies
 ├── .env.example                # Environment variables template
 ├── README.md                   # Project documentation
-├── information.md              # Detailed setup guide + dummy examples
-├── run.sh                      # One-command startup script
+├── information.md              # Detailed setup guide
+├── run.sh                      # Startup script
 │
 ├── api/
-│   ├── __init__.py             # BaseConnector abstract class
-│   ├── facebook_connector.py   # Meta Graph API v19
-│   ├── instagram_connector.py  # Instagram Graph API
-│   ├── twitter_connector.py    # Twitter API v2
-│   ├── linkedin_connector.py   # LinkedIn API v2
-│   ├── tiktok_connector.py     # TikTok Content Posting API v2
-│   ├── pinterest_connector.py  # Pinterest API v5
-│   └── scheduler.py            # Background scheduler
+│   ├── __init__.py
+│   ├── facebook_connector.py
+│   ├── instagram_connector.py
+│   ├── twitter_connector.py
+│   ├── linkedin_connector.py
+│   ├── tiktok_connector.py
+│   ├── pinterest_connector.py
+│   └── scheduler.py
 │
 ├── templates/
-│   └── index.html              # Main UI
+│   └── index.html
 │
 └── static/
     ├── css/
-    │   └── style.css           # Dark industrial design system
+    │   └── style.css
     │
     ├── js/
-    │   └── app.js              # Frontend logic
+    │   └── app.js
     │
-    └── uploads/                # Uploaded media storage
-🚀 Getting Started
-📌 Requirements
-Python 3.9+
-pip
-⚙️ Installation
-1️⃣ Clone or Extract the Project
+    └── uploads/
+```
+
+---
+
+# ⚡ Quick Start
+
+## 1️⃣ Clone the Repository
+
+```bash
+git clone https://github.com/your-username/social-ads-platform.git
 cd social-ads-platform
-2️⃣ Install Dependencies
+```
+
+## 2️⃣ Install Dependencies
+
+```bash
 pip install -r requirements.txt
-3️⃣ Configure Environment Variables
+```
+
+## 3️⃣ Configure Environment Variables
+
+```bash
 cp .env.example .env
+```
 
-Edit .env and update:
+Edit `.env` and add:
 
-SECRET_KEY
-API credentials
-Platform tokens
-4️⃣ Run the Application
+- SECRET_KEY
+- API Keys
+- OAuth Tokens
+- Platform Credentials
+
+---
+
+## 4️⃣ Run the Application
+
+```bash
 python app.py
+```
 
-Or use:
+or
 
+```bash
 bash run.sh
-5️⃣ Open in Browser
-http://localhost:5000
-⚡ Quick Start
-cd social-ads-platform
+```
 
-pip install -r requirements.txt
+---
 
-cp .env.example .env
+# 🌐 Application URL
 
-python app.py
+Open in browser:
 
-Then open:
+```bash
+http://127.0.0.1:5000
+```
 
-http://localhost:5000
-🔌 Connecting Platforms
-Open the sidebar
-Select a platform
-Enter API credentials
-Click Connect
+---
 
-Detailed setup instructions are available in:
+# 🔌 Platform Connection Workflow
 
-information.md
-📤 Publishing Ads
-Steps
-Connect one or more platforms
-Open the Compose tab
-Fill in:
-Ad Title
-Ad Copy
-Hashtags
-Link
-CTA
-Upload media (optional)
-Select target platforms
-Click:
-Publish to All Connected Platforms
-Monitor real-time posting status
-🕒 Scheduling Posts
-Create your ad in the Compose tab
-Switch to the Schedule tab
-Choose a future date & time
-Click:
-Schedule Post
+1. Open Dashboard
+2. Select Platform
+3. Enter API Credentials
+4. Click Connect
+5. Start Publishing Ads
 
-The scheduler checks every 10 seconds and automatically publishes scheduled ads.
+---
 
-📡 REST API Reference
-Method	Endpoint	Description
-GET	/api/platforms	List all platforms + status
-POST	/api/connect	Connect a platform
-POST	/api/disconnect	Disconnect a platform
-POST	/api/test-connection	Validate credentials
-POST	/api/upload	Upload media
-POST	/api/post	Publish ads
-GET	/api/history	Retrieve recent posts
-GET	/api/stats	Get analytics statistics
-POST	/api/schedule	Schedule a future post
-GET	/api/schedule	Get scheduled posts
-DELETE	/api/schedule/<id>	Cancel scheduled post
-GET	/api/events?since=	Real-time event polling
-🛠️ Troubleshooting
-Problem	Solution
-ModuleNotFoundError: flask	Run pip install -r requirements.txt
-Port 5000 already in use	Stop the existing process or change the Flask port
-Platform returns 401	Reconnect using a fresh access token
-Instagram text-only post fails	Instagram requires image/video media
-Twitter/X returns 403	Enable Read & Write permissions
-TikTok upload fails	Ensure video.upload scope is granted
-🧩 Supported Platforms
-Facebook
-Instagram
-Twitter / X
-LinkedIn
-TikTok
-Pinterest
-🏗️ Built With
-Python
-Flask
-HTML5
-CSS3
-JavaScript
-REST APIs
-OAuth Authentication
-📄 License
+# 📤 Ad Publishing Workflow
 
-This project is intended for educational and development purposes.
+1. Create Ad Campaign
+2. Add Ad Content
+3. Upload Media Files
+4. Select Target Platforms
+5. Publish Instantly or Schedule
+6. Monitor Real-time Status
 
-⭐ social-media-ads-platform
+---
 
-A unified dashboard to publish and schedule ads across multiple social media platforms from one place.
+# 📡 REST API Endpoints
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/api/platforms` | Get connected platforms |
+| POST | `/api/connect` | Connect platform |
+| POST | `/api/disconnect` | Disconnect platform |
+| POST | `/api/test-connection` | Validate credentials |
+| POST | `/api/upload` | Upload media |
+| POST | `/api/post` | Publish ads |
+| GET | `/api/history` | Fetch post history |
+| GET | `/api/stats` | Analytics & statistics |
+| POST | `/api/schedule` | Schedule post |
+| GET | `/api/schedule` | List scheduled posts |
+| DELETE | `/api/schedule/<id>` | Cancel scheduled post |
+| GET | `/api/events?since=` | Real-time events |
+
+---
+
+# 📈 System Workflow
+
+1. User Authentication
+2. Platform Connection
+3. Ad Creation
+4. Media Upload
+5. API-based Publishing
+6. Real-time Status Tracking
+7. Analytics & Reporting
+
+---
+
+# 🔮 Future Enhancements
+
+- AI-based Ad Content Generation
+- Campaign Performance Prediction
+- Advanced Audience Targeting
+- Social Media Insights Dashboard
+- Mobile Application Support
+- Multi-user Team Collaboration
+
+---
+
+# 👨‍💻 Developed For
+
+Unified Multi-Platform Social Media Advertisement Publishing & Campaign Management using Python, Flask, APIs, and Automation.
+
+---
