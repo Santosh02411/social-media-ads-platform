@@ -1,374 +1,237 @@
-import { BaseAdapter } from '../BaseAdapter.js';
+import { BaseAdapter, requireFields } from '../BaseAdapter.js';
+import { httpRequest, PlatformError } from '../http.js';
+import { bytesToBase64 } from '../../utils/crypto.js';
 
+// Currencies whose smallest unit is the whole unit (Meta budgets are in minor units)
+const ZERO_DECIMAL = new Set(['JPY', 'KRW', 'VND', 'CLP', 'ISK', 'PYG', 'UGX', 'XAF', 'XOF', 'XPF', 'KMF', 'GNF', 'RWF', 'DJF', 'BIF', 'VUV']);
+
+const RATE_LIMIT_CODES = new Set([4, 17, 32, 613]);
+const AUTH_CODES = new Set([102, 190, 463, 467]);
+const TEMPORARY_CODES = new Set([1, 2]);
+
+const OBJECTIVES = {
+  TRAFFIC: { objective: 'OUTCOME_TRAFFIC', optimizationGoal: 'LINK_CLICKS', destinationType: 'WEBSITE' },
+  AWARENESS: { objective: 'OUTCOME_AWARENESS', optimizationGoal: 'REACH' },
+};
+
+/**
+ * Facebook ads through the Meta Marketing API.
+ * Everything is created PAUSED unless the campaign asks otherwise.
+ */
 export class FacebookAdapter extends BaseAdapter {
-  constructor(config) {
-    super(config);
-    this.apiVersion = 'v18.0';
-    this.baseUrl = `https://graph.facebook.com/${this.apiVersion}`;
-  }
+  get publisherPlatforms() { return ['facebook']; }
 
-  async connectPlatform(credentials) {
+  get base() { return `${this.endpoints.metaGraph}/${this.endpoints.metaVersion}`; }
+  get accountPath() { return `/act_${String(this.cfg.accountId || '').replace(/^act_/, '')}`; }
+
+  async api(path, { method = 'GET', query, json } = {}) {
     try {
-      const { accessToken, accountId } = credentials;
-      
-      // Validate credentials by making a test API call
-      const response = await this.makeApiRequest(`/me?access_token=${accessToken}`);
-      
-      if (!response.id) {
-        throw new Error('Invalid access token');
-      }
-
-      // Test account access
-      const accountResponse = await this.makeApiRequest(
-        `/act_${accountId}?access_token=${accessToken}&fields=name,account_status`
-      );
-
-      if (accountResponse.account_status !== 1) {
-        throw new Error('Account is not active');
-      }
-
-      this.config.accessToken = accessToken;
-      this.config.accountId = accountId;
-      this.config.connectedAt = new Date().toISOString();
-
-      this.log('info', 'Successfully connected to Facebook Ads', {
-        accountId,
-        accountName: accountResponse.name
+      return await httpRequest(`${this.base}${path}`, {
+        method,
+        headers: { Authorization: `Bearer ${this.cfg.accessToken}` },
+        query,
+        json,
+        platform: this.platform.type,
       });
-
-      return {
-        success: true,
-        platformId: this.config.id,
-        externalAccountId: accountId,
-        accountName: accountResponse.name
-      };
     } catch (error) {
-      this.log('error', 'Failed to connect to Facebook Ads', { error: error.message });
-      throw this.handleError(error);
+      throw classifyMetaError(error);
     }
   }
 
-  async publishAd(adData) {
-    try {
-      const { campaign, creative, targeting, budget } = adData;
-      
-      // Step 1: Create campaign
-      const campaignData = this.transformCampaignData({
-        name: campaign.title,
-        objective: this.getFacebookObjective(campaign.objective || 'OUTCOME_TRAFFIC'),
-        special_ad_categories: [],
-        status: 'PAUSED',
-        buy_type: 'AUCTION'
+  async validateCredentials() {
+    const me = await this.api('/me', { query: { fields: 'id,name' } });
+    if (!this.cfg.accountId) return { accountName: me.name, currency: null };
+
+    const account = await this.api(this.accountPath, { query: { fields: 'name,account_status,currency' } });
+    if (account.account_status !== 1) {
+      throw new PlatformError('This ad account is not active (check billing or restrictions in Meta Ads Manager)', {
+        platform: this.platform.type, code: 'ACCOUNT_INACTIVE',
       });
-
-      const campaignResponse = await this.makeApiRequest(
-        `/act_${this.config.accountId}/campaigns`,
-        'POST',
-        campaignData
-      );
-
-      // Step 2: Create ad set
-      const adSetData = {
-        name: `${campaign.title} - Ad Set`,
-        campaign_id: campaignResponse.id,
-        optimization_goal: 'IMPRESSIONS',
-        billing_event: 'IMPRESSIONS',
-        bid_amount: 100,
-        daily_budget: budget * 100, // Convert to cents
-        targeting: this.transformTargeting(targeting),
-        status: 'PAUSED'
-      };
-
-      const adSetResponse = await this.makeApiRequest(
-        `/act_${this.config.accountId}/adsets`,
-        'POST',
-        adSetData
-      );
-
-      // Step 3: Create ad creative
-      const creativeData = await this.transformCreative(creative);
-      const creativeResponse = await this.makeApiRequest(
-        `/act_${this.config.accountId}/adcreatives`,
-        'POST',
-        creativeData
-      );
-
-      // Step 4: Create ad
-      const adData = {
-        name: `${campaign.title} - Ad`,
-        adset_id: adSetResponse.id,
-        creative: { creative_id: creativeResponse.id },
-        status: 'PAUSED'
-      };
-
-      const adResponse = await this.makeApiRequest(
-        `/act_${this.config.accountId}/ads`,
-        'POST',
-        adData
-      );
-
-      this.log('info', 'Successfully published Facebook ad', {
-        campaignId: campaignResponse.id,
-        adSetId: adSetResponse.id,
-        adId: adResponse.id
-      });
-
-      return {
-        success: true,
-        externalId: adResponse.id,
-        campaignId: campaignResponse.id,
-        adSetId: adSetResponse.id,
-        creativeId: creativeResponse.id,
-        status: 'published'
-      };
-    } catch (error) {
-      this.log('error', 'Failed to publish Facebook ad', { error: error.message });
-      throw this.handleError(error);
     }
+    if (this.cfg.pageId) await this.api(`/${this.cfg.pageId}`, { query: { fields: 'id,name' } });
+    return { accountName: account.name, currency: account.currency };
   }
 
-  async getStatus(externalId) {
-    try {
-      const response = await this.makeApiRequest(
-        `/${externalId}?fields=status,effective_status`
-      );
-
-      return {
-        success: true,
-        status: this.mapFacebookStatus(response.status),
-        effectiveStatus: response.effective_status,
-        lastUpdated: new Date().toISOString()
-      };
-    } catch (error) {
-      this.log('error', 'Failed to get Facebook ad status', { 
-        externalId, 
-        error: error.message 
-      });
-      throw this.handleError(error);
-    }
-  }
-
-  async updateAd(externalId, updateData) {
-    try {
-      const updates = this.transformUpdateData(updateData);
-      
-      const response = await this.makeApiRequest(
-        `/${externalId}`,
-        'POST',
-        updates
-      );
-
-      this.log('info', 'Successfully updated Facebook ad', { externalId });
-
-      return {
-        success: true,
-        externalId,
-        updatedFields: Object.keys(updateData)
-      };
-    } catch (error) {
-      this.log('error', 'Failed to update Facebook ad', { 
-        externalId, 
-        error: error.message 
-      });
-      throw this.handleError(error);
-    }
-  }
-
-  async deleteAd(externalId) {
-    try {
-      await this.makeApiRequest(`/${externalId}`, 'DELETE');
-
-      this.log('info', 'Successfully deleted Facebook ad', { externalId });
-
-      return {
-        success: true,
-        externalId
-      };
-    } catch (error) {
-      this.log('error', 'Failed to delete Facebook ad', { 
-        externalId, 
-        error: error.message 
-      });
-      throw this.handleError(error);
-    }
-  }
-
-  async getAnalytics(filters = {}) {
-    try {
-      const { datePreset = 'last_7d', metrics = ['impressions', 'clicks', 'spend'] } = filters;
-      
-      const queryParams = new URLSearchParams({
-        fields: metrics.join(','),
-        date_preset: datePreset
-      });
-
-      const response = await this.makeApiRequest(
-        `/act_${this.config.accountId}/insights?${queryParams}`
-      );
-
-      return {
-        success: true,
-        data: response.data || [],
-        pagination: response.paging
-      };
-    } catch (error) {
-      this.log('error', 'Failed to get Facebook analytics', { error: error.message });
-      throw this.handleError(error);
-    }
-  }
-
-  async validateCredentials(credentials) {
-    try {
-      const { accessToken } = credentials;
-      
-      const response = await this.makeApiRequest(`/me?access_token=${accessToken}`);
-      
-      return !!response.id;
-    } catch (error) {
-      return false;
-    }
-  }
-
-  getSupportedAdFormats() {
-    return ['image', 'video', 'carousel', 'collection'];
-  }
-
-  getTargetingOptions() {
-    return [
-      'age',
-      'gender',
-      'location',
-      'interests',
-      'behaviors',
-      'custom_audiences',
-      'lookalike_audiences',
-      'education',
-      'work',
-      'relationship',
-      'language'
-    ];
-  }
-
-  // Helper methods
-  async makeApiRequest(endpoint, method = 'GET', data = null) {
-    const url = `${this.baseUrl}${endpoint}`;
-    const headers = {
-      'Content-Type': 'application/json'
-    };
-
-    let options = { headers, method };
-
-    if (data && method !== 'GET') {
-      options.body = JSON.stringify(data);
-    }
-
-    // Simulate API call for demo
-    await new Promise(resolve => setTimeout(resolve, 500 + Math.random() * 1000));
-
-    // Mock response - in production, this would be a real fetch call
-    if (endpoint.includes('/me')) {
-      return { id: '123456789', name: 'Test User' };
-    } else if (endpoint.includes('campaigns')) {
-      return { id: 'camp_' + Math.random().toString(36).substr(2, 9) };
-    } else if (endpoint.includes('adsets')) {
-      return { id: 'adset_' + Math.random().toString(36).substr(2, 9) };
-    } else if (endpoint.includes('ads')) {
-      return { id: 'ad_' + Math.random().toString(36).substr(2, 9) };
-    } else if (endpoint.includes('insights')) {
-      return {
-        data: [
-          { impressions: 1000, clicks: 50, spend: 25.00 },
-          { impressions: 1200, clicks: 60, spend: 30.00 }
-        ]
-      };
-    } else {
-      return { success: true };
-    }
-  }
-
-  getFacebookObjective(objective) {
-    const objectives = {
-      'TRAFFIC': 'OUTCOME_TRAFFIC',
-      'ENGAGEMENT': 'OUTCOME_ENGAGEMENT',
-      'CONVERSIONS': 'OUTCOME_SALES',
-      'LEADS': 'OUTCOME_LEADS',
-      'AWARENESS': 'OUTCOME_AWARENESS'
-    };
-    return objectives[objective] || 'OUTCOME_TRAFFIC';
-  }
-
-  transformCampaignData(campaignData) {
+  async listAccounts() {
+    const [adAccounts, pages] = await Promise.all([
+      this.api('/me/adaccounts', { query: { fields: 'account_id,name,account_status,currency', limit: 100 } }),
+      this.api('/me/accounts', { query: { fields: 'id,name,instagram_business_account{id,username}', limit: 100 } }),
+    ]);
     return {
-      ...campaignData,
-      access_token: this.config.accessToken
+      accounts: (adAccounts.data || [])
+        .filter((a) => a.account_status === 1)
+        .map((a) => ({ id: a.account_id, name: a.name, currency: a.currency })),
+      pages: (pages.data || []).map((p) => ({
+        id: p.id,
+        name: p.name,
+        instagramUserId: p.instagram_business_account?.id || null,
+        instagramUsername: p.instagram_business_account?.username || null,
+      })),
     };
   }
 
-  transformTargeting(targeting) {
-    return {
-      age_min: targeting.ageMin || 18,
-      age_max: targeting.ageMax || 65,
-      genders: targeting.genders || [1, 2],
-      geo_locations: targeting.locations || [],
-      interests: targeting.interests || [],
-      behaviors: targeting.behaviors || []
-    };
-  }
-
-  async transformCreative(creative) {
-    const creativeData = {
-      name: creative.name || 'Ad Creative',
-      title: creative.headline || 'Default Headline',
-      body: creative.body || 'Default body text',
-      object_url: creative.url || 'https://example.com'
-    };
-
-    if (creative.image) {
-      creativeData.image_hash = creative.image;
+  async publishAd(ad, { state = {}, saveState = async () => {} } = {}) {
+    requireFields('Facebook', [
+      ['an ad account (reconnect and pick one)', this.cfg.accountId],
+      ['a Facebook Page (reconnect and pick one)', this.cfg.pageId],
+      ['destination URL', ad.creative.url],
+      ['ad text', ad.creative.body],
+    ]);
+    // Meta ads use the first image; videos are ignored here (TikTok is the video platform)
+    const image = ad.media.find((m) => m.kind === 'image');
+    if (!image && ad.media.length > 0) {
+      throw new PlatformError('Meta ads need an image. Attach an image to this campaign (videos are not supported for Facebook/Instagram yet).', {
+        platform: this.platform.type, code: 'INVALID_CREATIVE',
+      });
     }
 
-    if (creative.video) {
-      creativeData.video_id = creative.video;
+    const goal = OBJECTIVES[ad.objective] || OBJECTIVES.TRAFFIC;
+    const status = ad.startPaused ? 'PAUSED' : 'ACTIVE';
+    const currency = this.cfg.currency || 'USD';
+    const minor = ZERO_DECIMAL.has(currency) ? 1 : 100;
+
+    // 1. Campaign
+    if (!state.campaignId) {
+      const campaign = await this.api(`${this.accountPath}/campaigns`, {
+        method: 'POST',
+        json: {
+          name: ad.name,
+          objective: goal.objective,
+          status,
+          special_ad_categories: [],
+          is_adset_budget_sharing_enabled: false,
+        },
+      });
+      state.campaignId = campaign.id;
+      await saveState(state);
     }
 
-    return creativeData;
-  }
-
-  transformUpdateData(updateData) {
-    const transformed = {};
-    
-    if (updateData.status) {
-      transformed.status = updateData.status.toUpperCase();
+    // 2. Ad set (budget, schedule and targeting live here)
+    if (!state.adSetId) {
+      const budgetField = ad.budget.type === 'lifetime' ? 'lifetime_budget' : 'daily_budget';
+      const adSet = await this.api(`${this.accountPath}/adsets`, {
+        method: 'POST',
+        json: {
+          name: `${ad.name} - ad set`,
+          campaign_id: state.campaignId,
+          [budgetField]: Math.round(ad.budget.amount * minor),
+          billing_event: 'IMPRESSIONS',
+          optimization_goal: goal.optimizationGoal,
+          bid_strategy: 'LOWEST_COST_WITHOUT_CAP',
+          ...(goal.destinationType ? { destination_type: goal.destinationType } : {}),
+          start_time: ad.schedule.start || undefined,
+          end_time: ad.schedule.end || undefined,
+          targeting: {
+            geo_locations: { countries: ad.targeting.countries },
+            age_min: ad.targeting.ageMin,
+            age_max: ad.targeting.ageMax,
+            publisher_platforms: this.publisherPlatforms,
+          },
+          status,
+        },
+      });
+      state.adSetId = adSet.id;
+      await saveState(state);
     }
-    
-    if (updateData.name) {
-      transformed.name = updateData.name;
+
+    // 3. Image upload (bytes come from our R2 bucket)
+    if (!state.imageHash && image) {
+      const bytes = await image.getBytes();
+      const upload = await this.api(`${this.accountPath}/adimages`, {
+        method: 'POST',
+        json: { bytes: bytesToBase64(new Uint8Array(bytes)) },
+      });
+      const first = Object.values(upload.images || {})[0];
+      if (!first?.hash) throw new PlatformError('Meta did not return an image hash', { platform: this.platform.type });
+      state.imageHash = first.hash;
+      await saveState(state);
     }
 
-    return transformed;
+    // 4. Creative: current object_story_spec format (needs a Page)
+    if (!state.creativeId) {
+      const link = ad.creative.url;
+      const creative = await this.api(`${this.accountPath}/adcreatives`, {
+        method: 'POST',
+        json: {
+          name: `${ad.name} - creative`,
+          object_story_spec: {
+            page_id: this.cfg.pageId,
+            ...this.creativeIdentity(),
+            link_data: {
+              link,
+              message: ad.creative.body,
+              name: ad.creative.headline,
+              call_to_action: { type: ad.creative.cta, value: { link } },
+              ...(state.imageHash ? { image_hash: state.imageHash } : {}),
+            },
+          },
+        },
+      });
+      state.creativeId = creative.id;
+      await saveState(state);
+    }
+
+    // 5. Ad
+    if (!state.adId) {
+      const created = await this.api(`${this.accountPath}/ads`, {
+        method: 'POST',
+        json: { name: `${ad.name} - ad`, adset_id: state.adSetId, creative: { creative_id: state.creativeId }, status },
+      });
+      state.adId = created.id;
+      await saveState(state);
+    }
+
+    this.log('info', 'Published ad', { adId: state.adId });
+    return { externalId: state.adId, externalRef: { ...state } };
   }
 
-  mapFacebookStatus(status) {
-    const statusMap = {
-      'ACTIVE': 'active',
-      'PAUSED': 'paused',
-      'ARCHIVED': 'archived',
-      'DELETED': 'deleted'
-    };
-    return statusMap[status] || 'unknown';
+  /** Overridden by Instagram to attach the Instagram account. */
+  creativeIdentity() { return {}; }
+
+  async setStatus(ref, status) {
+    const value = status === 'active' ? 'ACTIVE' : 'PAUSED';
+    // Campaign, ad set and ad must all agree for the ad to deliver (or stop)
+    for (const id of [ref.campaignId, ref.adSetId, ref.adId].filter(Boolean)) {
+      await this.api(`/${id}`, { method: 'POST', json: { status: value } });
+    }
   }
 
-  isRetryableError(error) {
-    const retryablePatterns = [
-      /rate limit/i,
-      /timeout/i,
-      /network/i,
-      /temporary/i,
-      /service unavailable/i
-    ];
-
-    return retryablePatterns.some(pattern => pattern.test(error.message)) ||
-           error.code === 'API_EC_SERVICE' ||
-           error.code === 'API_EC_TOO_MANY_CALLS';
+  async getInsights(ref, { since, until }) {
+    if (!ref.campaignId) return [];
+    const result = await this.api(`/${ref.campaignId}/insights`, {
+      query: {
+        fields: 'impressions,clicks,spend,actions',
+        time_increment: 1,
+        time_range: JSON.stringify({ since, until }),
+        limit: 500,
+      },
+    });
+    const conversionTypes = new Set(['purchase', 'lead', 'complete_registration', 'offsite_conversion.fb_pixel_purchase']);
+    return (result.data || []).map((row) => ({
+      date: row.date_start,
+      impressions: Number(row.impressions || 0),
+      clicks: Number(row.clicks || 0),
+      spend: Number(row.spend || 0),
+      conversions: (row.actions || [])
+        .filter((a) => conversionTypes.has(a.action_type))
+        .reduce((sum, a) => sum + Number(a.value || 0), 0),
+    }));
   }
+}
+
+function classifyMetaError(error) {
+  if (!(error instanceof PlatformError)) return error;
+  const code = error.body?.error?.code;
+  if (RATE_LIMIT_CODES.has(code) || (code >= 80000 && code <= 80014)) {
+    error.code = 'RATE_LIMITED';
+    error.retryable = true;
+  } else if (AUTH_CODES.has(code)) {
+    error.code = 'AUTH_FAILED';
+    error.retryable = false;
+    error.message = 'The Meta access token is invalid or expired. Reconnect the platform.';
+  } else if (TEMPORARY_CODES.has(code)) {
+    error.code = 'TEMPORARY_FAILURE';
+    error.retryable = true;
+  }
+  return error;
 }
