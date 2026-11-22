@@ -13,8 +13,9 @@ export class Media {
     // Generate unique R2 key
     const r2Key = `${userId}/${mediaId}-${filename}`;
     
-    // Upload file to R2
-    const uploadedFile = await this.r2Bucket.put(r2Key, file);
+    // Upload file to R2 (R2 objects have no public URL; files are served through the API)
+    await this.r2Bucket.put(r2Key, file, { httpMetadata: { contentType: mediaData.mimeType } });
+    const url = `/api/media/${mediaId}/file`;
     
     // Create database record
     const stmt = this.db.prepare(`
@@ -29,7 +30,7 @@ export class Media {
       mimeType,
       size,
       r2Key,
-      uploadedFile.url,
+      url,
       userId
     ).run();
 
@@ -53,7 +54,7 @@ export class Media {
       LIMIT ? OFFSET ?
     `);
 
-    return await stmt.bind(userId, limit, offset).all();
+    return await stmt.bind(userId, limit, offset).all().then((r) => r.results);
   }
 
   async delete(mediaId, userId) {
@@ -98,7 +99,7 @@ export class Media {
       ORDER BY cm.created_at DESC
     `);
 
-    return await stmt.bind(campaignId).all();
+    return await stmt.bind(campaignId).all().then((r) => r.results);
   }
 
   async unlinkFromCampaign(mediaId, campaignId) {
@@ -110,21 +111,6 @@ export class Media {
     await stmt.bind(campaignId, mediaId).run();
     
     return this.getCampaignMedia(campaignId);
-  }
-
-  async getSignedUrl(mediaId, expiresIn = 3600) {
-    const media = await this.findById(mediaId);
-    if (!media) {
-      throw new Error('Media not found');
-    }
-
-    // Generate signed URL for R2 access
-    const signedUrl = await this.r2Bucket.createSignedUrl({
-      key: media.r2_key,
-      expiresIn: expiresIn
-    });
-
-    return signedUrl;
   }
 
   async updateMediaInfo(mediaId, userId, updateData) {
@@ -164,7 +150,7 @@ export class Media {
     `);
 
     const searchPattern = `%${query}%`;
-    return await stmt.bind(userId, searchPattern, searchPattern, limit).all();
+    return await stmt.bind(userId, searchPattern, searchPattern, limit).all().then((r) => r.results);
   }
 
   async getMediaStats(userId) {

@@ -1,49 +1,72 @@
-import { v4 as uuidv4 } from 'uuid';
+const parseJson = (value, fallback) => {
+  if (!value) return fallback;
+  try { return JSON.parse(value); } catch { return fallback; }
+};
+
+const rows = (result) => result.results || [];
 
 export class Campaign {
   constructor(db) {
     this.db = db;
   }
 
-  async create(campaignData, userId) {
-    const {
-      title,
-      description,
-      budget,
-      scheduleStart,
-      scheduleEnd,
-      platforms
-    } = campaignData;
+  /** Converts a DB row into the API shape (JSON columns parsed). */
+  static hydrate(row) {
+    if (!row) return row;
+    const out = {
+      ...row,
+      targeting: parseJson(row.targeting, { countries: ['US'], ageMin: 18, ageMax: 65, keywords: [] }),
+      variants: parseJson(row.variants, { headlines: [], descriptions: [] }),
+      publish_paused: Boolean(row.publish_paused),
+    };
+    if (typeof row.platforms === 'string') {
+      // json_group_array yields one all-null entry when there are no platforms
+      out.platforms = parseJson(row.platforms, []).filter((p) => p.id);
+    }
+    return out;
+  }
 
-    const campaignId = uuidv4();
+  async create(data, userId) {
+    const campaignId = crypto.randomUUID();
 
-    // Create campaign
-    const stmt = this.db.prepare(`
-      INSERT INTO campaigns (id, title, description, budget, schedule_start, schedule_end, user_id)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
-    `);
-
-    await stmt.bind(
+    await this.db.prepare(`
+      INSERT INTO campaigns
+        (id, title, description, budget, budget_type, objective, schedule_start, schedule_end,
+         destination_url, headline, ad_copy, call_to_action, targeting, variants, publish_paused, user_id)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).bind(
       campaignId,
-      title,
-      description,
-      budget,
-      scheduleStart,
-      scheduleEnd,
+      data.title,
+      data.description ?? null,
+      data.budget,
+      data.budgetType,
+      data.objective,
+      data.scheduleStart ?? null,
+      data.scheduleEnd ?? null,
+      data.destinationUrl ?? null,
+      data.headline ?? null,
+      data.adCopy ?? null,
+      data.callToAction,
+      JSON.stringify(data.targeting),
+      data.variants ? JSON.stringify(data.variants) : null,
+      data.publishPaused ? 1 : 0,
       userId
     ).run();
 
-    // Link platforms to campaign
-    if (platforms && platforms.length > 0) {
-      await this.linkPlatforms(campaignId, platforms);
+    for (const platformId of data.platforms || []) {
+      await this.db.prepare('INSERT INTO campaign_platforms (id, campaign_id, platform_id) VALUES (?, ?, ?)')
+        .bind(crypto.randomUUID(), campaignId, platformId).run();
+    }
+    for (const mediaId of data.mediaIds || []) {
+      await this.linkMedia(campaignId, mediaId);
     }
 
     return this.findById(campaignId);
   }
 
   async findById(campaignId) {
-    const stmt = this.db.prepare(`
-      SELECT c.*, 
+    const row = await this.db.prepare(`
+      SELECT c.*,
              json_group_array(
                json_object(
                  'id', cp.id,
@@ -52,7 +75,9 @@ export class Campaign {
                  'platformType', p.type,
                  'status', cp.status,
                  'errorMessage', cp.error_message,
-                 'retryCount', cp.retry_count
+                 'retryCount', cp.retry_count,
+                 'externalId', cp.external_id,
+                 'publishedAt', cp.published_at
                )
              ) as platforms
       FROM campaigns c
@@ -60,20 +85,13 @@ export class Campaign {
       LEFT JOIN platforms p ON cp.platform_id = p.id
       WHERE c.id = ?
       GROUP BY c.id
-    `);
-
-    const result = await stmt.bind(campaignId).first();
-    
-    if (result && result.platforms) {
-      result.platforms = JSON.parse(result.platforms);
-    }
-    
-    return result;
+    `).bind(campaignId).first();
+    return Campaign.hydrate(row);
   }
 
   async findByUserId(userId, limit = 50, offset = 0) {
-    const stmt = this.db.prepare(`
-      SELECT c.*, 
+    const result = await this.db.prepare(`
+      SELECT c.*,
              COUNT(cp.id) as platform_count,
              SUM(CASE WHEN cp.status = 'success' THEN 1 ELSE 0 END) as success_count,
              SUM(CASE WHEN cp.status = 'failed' THEN 1 ELSE 0 END) as failed_count
@@ -83,88 +101,100 @@ export class Campaign {
       GROUP BY c.id
       ORDER BY c.created_at DESC
       LIMIT ? OFFSET ?
-    `);
-
-    return await stmt.bind(userId, limit, offset).all();
+    `).bind(userId, limit, offset).all();
+    return rows(result).map(Campaign.hydrate);
   }
 
-  async update(campaignId, updateData) {
-    const { title, description, budget, scheduleStart, scheduleEnd, status } = updateData;
-    
-    const stmt = this.db.prepare(`
-      UPDATE campaigns 
-      SET title = ?, description = ?, budget = ?, 
-          schedule_start = ?, schedule_end = ?, status = ?,
-          updated_at = CURRENT_TIMESTAMP
-      WHERE id = ?
-    `);
+  /** Applies only the provided fields. */
+  async update(campaignId, patch) {
+    const columns = {
+      title: ['title', (v) => v],
+      description: ['description', (v) => v ?? null],
+      budget: ['budget', (v) => v],
+      budgetType: ['budget_type', (v) => v],
+      objective: ['objective', (v) => v],
+      scheduleStart: ['schedule_start', (v) => v ?? null],
+      scheduleEnd: ['schedule_end', (v) => v ?? null],
+      destinationUrl: ['destination_url', (v) => v],
+      headline: ['headline', (v) => v],
+      adCopy: ['ad_copy', (v) => v],
+      callToAction: ['call_to_action', (v) => v],
+      targeting: ['targeting', (v) => JSON.stringify(v)],
+      variants: ['variants', (v) => JSON.stringify(v)],
+      publishPaused: ['publish_paused', (v) => (v ? 1 : 0)],
+    };
 
-    await stmt.bind(
-      title,
-      description,
-      budget,
-      scheduleStart,
-      scheduleEnd,
-      status,
-      campaignId
-    ).run();
+    const sets = [];
+    const values = [];
+    for (const [key, [column, convert]] of Object.entries(columns)) {
+      if (Object.prototype.hasOwnProperty.call(patch, key)) {
+        sets.push(`${column} = ?`);
+        values.push(convert(patch[key]));
+      }
+    }
+
+    if (sets.length > 0) {
+      await this.db.prepare(`UPDATE campaigns SET ${sets.join(', ')}, updated_at = CURRENT_TIMESTAMP WHERE id = ?`)
+        .bind(...values, campaignId).run();
+    }
+    if (Array.isArray(patch.mediaIds)) {
+      await this.db.prepare('DELETE FROM campaign_media WHERE campaign_id = ?').bind(campaignId).run();
+      for (const mediaId of patch.mediaIds) await this.linkMedia(campaignId, mediaId);
+    }
 
     return this.findById(campaignId);
   }
 
+  async setStatus(campaignId, status) {
+    await this.db.prepare('UPDATE campaigns SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?')
+      .bind(status, campaignId).run();
+  }
+
   async delete(campaignId) {
-    // Campaign platforms and media will be deleted due to CASCADE constraints
-    const stmt = this.db.prepare(`DELETE FROM campaigns WHERE id = ?`);
-    await stmt.bind(campaignId).run();
+    // campaign_platforms, campaign_media, jobs and metrics are removed by ON DELETE CASCADE
+    await this.db.prepare('DELETE FROM campaigns WHERE id = ?').bind(campaignId).run();
   }
 
-  async linkPlatforms(campaignId, platformIds) {
-    for (const platformId of platformIds) {
-      const cpId = uuidv4();
-      const stmt = this.db.prepare(`
-        INSERT INTO campaign_platforms (id, campaign_id, platform_id)
-        VALUES (?, ?, ?)
-      `);
-      await stmt.bind(cpId, campaignId, platformId).run();
-    }
-  }
-
-  async updatePlatformStatus(campaignId, platformId, status, errorMessage = null) {
-    const stmt = this.db.prepare(`
-      UPDATE campaign_platforms 
-      SET status = ?, error_message = ?, updated_at = CURRENT_TIMESTAMP
-      WHERE campaign_id = ? AND platform_id = ?
-    `);
-
-    await stmt.bind(status, errorMessage, campaignId, platformId).run();
+  async linkMedia(campaignId, mediaId) {
+    const media = await this.db.prepare('SELECT mime_type FROM media WHERE id = ?').bind(mediaId).first();
+    const type = media?.mime_type?.startsWith('video/') ? 'video' : media?.mime_type?.startsWith('image/') ? 'image' : 'text';
+    await this.db.prepare('INSERT INTO campaign_media (id, campaign_id, media_id, media_type) VALUES (?, ?, ?, ?)')
+      .bind(crypto.randomUUID(), campaignId, mediaId, type).run();
   }
 
   async getMedia(campaignId) {
-    const stmt = this.db.prepare(`
-      SELECT cm.*, m.filename, m.original_name, m.mime_type, m.size, m.url
+    const result = await this.db.prepare(`
+      SELECT cm.media_type, m.id, m.filename, m.original_name, m.mime_type, m.size, m.url, m.r2_key
       FROM campaign_media cm
       JOIN media m ON cm.media_id = m.id
       WHERE cm.campaign_id = ?
-    `);
-
-    return await stmt.bind(campaignId).all();
+      ORDER BY cm.created_at ASC
+    `).bind(campaignId).all();
+    return rows(result);
   }
 
   async duplicate(campaignId, newTitle) {
     const original = await this.findById(campaignId);
-    if (!original) {
-      throw new Error('Campaign not found');
-    }
+    if (!original) throw new Error('Campaign not found');
 
-    const newCampaignData = {
+    const media = await this.getMedia(campaignId);
+    return this.create({
       title: newTitle,
       description: original.description,
       budget: original.budget,
+      budgetType: original.budget_type,
+      objective: original.objective,
       scheduleStart: original.schedule_start,
       scheduleEnd: original.schedule_end,
-      platforms: original.platforms?.map(p => p.platformId) || []
-    };
-
-    return await this.create(newCampaignData, original.user_id);
+      destinationUrl: original.destination_url,
+      headline: original.headline,
+      adCopy: original.ad_copy,
+      callToAction: original.call_to_action,
+      targeting: original.targeting,
+      variants: original.variants,
+      publishPaused: original.publish_paused,
+      platforms: original.platforms.map((p) => p.platformId),
+      mediaIds: media.map((m) => m.id),
+    }, original.user_id);
   }
 }

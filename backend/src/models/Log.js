@@ -60,7 +60,7 @@ export class Log {
     params.push(limit, offset);
 
     const stmt = this.db.prepare(query);
-    const results = await stmt.bind(...params).all();
+    const results = await stmt.bind(...params).all().then((r) => r.results);
     
     return results.map(log => ({
       ...log,
@@ -77,7 +77,7 @@ export class Log {
       LIMIT ?
     `);
 
-    const results = await stmt.bind(campaignId, limit).all();
+    const results = await stmt.bind(campaignId, limit).all().then((r) => r.results);
     
     return results.map(log => ({
       ...log,
@@ -94,7 +94,7 @@ export class Log {
       LIMIT ?
     `);
 
-    const results = await stmt.bind(platformId, limit).all();
+    const results = await stmt.bind(platformId, limit).all().then((r) => r.results);
     
     return results.map(log => ({
       ...log,
@@ -135,16 +135,17 @@ export class Log {
       LIMIT ?
     `);
 
-    return await stmt.bind(userId, limit).all();
+    return await stmt.bind(userId, limit).all().then((r) => r.results);
   }
 
   async deleteOldLogs(daysOld = 30) {
+    const days = Math.max(1, Math.floor(Number(daysOld)) || 30);
     const stmt = this.db.prepare(`
       DELETE FROM logs 
-      WHERE created_at < datetime('now', '-${daysOld} days')
+      WHERE created_at < datetime('now', ?)
     `);
 
-    return await stmt.run();
+    return await stmt.bind(`-${days} days`).run();
   }
 
   async cleanup(userId, maxLogs = 1000) {

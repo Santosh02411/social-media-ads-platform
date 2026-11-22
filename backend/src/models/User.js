@@ -1,80 +1,78 @@
 import bcrypt from 'bcryptjs';
-import { sign } from 'hono/jwt';
-// Removed uuid import
+
+// Work factor for new password hashes. Existing hashes made with a lower
+// cost are transparently upgraded the next time that user logs in.
+export const BCRYPT_COST = 12;
+
+// Valid bcrypt hash of a random string. Compared against when the email is
+// unknown so "no such user" and "wrong password" take the same time.
+export const DUMMY_HASH = '$2a$12$CNGOpELVL5ErRHCllafnfuacz1jl9pBy4afgYtDnptNLUkEktVvXG';
 
 export class User {
   constructor(db) {
     this.db = db;
   }
 
-  async create(userData) {
-    const { email, password, name } = userData;
+  async create({ email, password, name }) {
     const userId = crypto.randomUUID();
-    const passwordHash = await bcrypt.hash(password, 10);
-
-    const stmt = this.db.prepare(`
-      INSERT INTO users (id, email, password_hash, name)
-      VALUES (?, ?, ?, ?)
-    `);
+    const passwordHash = await bcrypt.hash(password, BCRYPT_COST);
 
     try {
-      await stmt.bind(userId, email || null, passwordHash || null, name || null).run();
-      return { id: userId, email, name };
+      await this.db
+        .prepare('INSERT INTO users (id, email, password_hash, name) VALUES (?, ?, ?, ?)')
+        .bind(userId, email, passwordHash, name || null)
+        .run();
+      return { id: userId, email, name: name || null };
     } catch (error) {
-      if (error.message.includes('UNIQUE constraint failed')) {
+      if (String(error.message).includes('UNIQUE constraint failed')) {
         throw new Error('Email already exists');
       }
       throw error;
     }
   }
 
+  // Case-insensitive so accounts created before emails were normalised still match.
   async findByEmail(email) {
-    const stmt = this.db.prepare(`
-      SELECT id, email, password_hash, name, created_at, updated_at
-      FROM users WHERE email = ?
-    `);
-
-    const result = await stmt.bind(email).first();
-    return result;
+    return this.db
+      .prepare(
+        `SELECT id, email, password_hash, name, created_at, updated_at
+         FROM users WHERE lower(email) = lower(?)`
+      )
+      .bind(email)
+      .first();
   }
 
   async findById(userId) {
-    const stmt = this.db.prepare(`
-      SELECT id, email, name, created_at, updated_at
-      FROM users WHERE id = ?
-    `);
-
-    const result = await stmt.bind(userId).first();
-    return result;
+    return this.db
+      .prepare('SELECT id, email, name, created_at, updated_at FROM users WHERE id = ?')
+      .bind(userId)
+      .first();
   }
 
+  /** Verifies a password; upgrades the stored hash if it uses an older cost. */
   async verifyPassword(user, password) {
-    return bcrypt.compare(password, user.password_hash);
+    const valid = await bcrypt.compare(password, user.password_hash);
+
+    if (valid && bcrypt.getRounds(user.password_hash) < BCRYPT_COST) {
+      const upgraded = await bcrypt.hash(password, BCRYPT_COST);
+      await this.db
+        .prepare('UPDATE users SET password_hash = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?')
+        .bind(upgraded, user.id)
+        .run();
+    }
+
+    return valid;
   }
 
-  async generateToken(user, secret) {
-    const payload = {
-      userId: user.id,
-      email: user.email,
-      exp: Math.floor(Date.now() / 1000) + 60 * 60 * 24 * 7 // 7 days
-    };
-    return await sign(payload, 'ads-saas-secret-key');
-  }
-
-  async update(userId, userData) {
-    const { email } = userData;
-    const stmt = this.db.prepare(`
-      UPDATE users 
-      SET email = ?, updated_at = CURRENT_TIMESTAMP
-      WHERE id = ?
-    `);
-
-    await stmt.bind(email, userId).run();
+  async update(userId, { name }) {
+    await this.db
+      .prepare('UPDATE users SET name = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?')
+      .bind(name ?? null, userId)
+      .run();
     return this.findById(userId);
   }
 
   async delete(userId) {
-    const stmt = this.db.prepare(`DELETE FROM users WHERE id = ?`);
-    await stmt.bind(userId).run();
+    await this.db.prepare('DELETE FROM users WHERE id = ?').bind(userId).run();
   }
 }
