@@ -1,277 +1,241 @@
 import { Hono } from 'hono';
 import { Campaign } from '../models/Campaign.js';
 import { Log } from '../models/Log.js';
+import { validateJson } from '../middleware/validate.js';
+import { getPagination } from '../utils/http.js';
+import { enqueueMetricsSync } from '../services/metrics.js';
+import {
+  campaignCreateSchema,
+  campaignUpdateSchema,
+  campaignDuplicateSchema,
+} from '../validation/schemas.js';
 
 const campaigns = new Hono();
 
-// Get all campaigns for user
+/** Loads a campaign and checks it belongs to the signed-in user (404 otherwise). */
+async function loadOwned(c) {
+  const found = await new Campaign(c.env.DB).findById(c.req.param('id'));
+  if (!found || found.user_id !== c.get('userId')) {
+    return { response: c.json({ error: 'Campaign not found' }, 404) };
+  }
+  return { campaign: found };
+}
+
+const placeholders = (items) => items.map(() => '?').join(',');
+
+/** Every id must belong to the user (prevents linking someone else's platforms/media). */
+async function ownsAll(c, table, ids) {
+  if (!ids || ids.length === 0) return true;
+  const { results } = await c.env.DB.prepare(
+    `SELECT id FROM ${table} WHERE user_id = ? AND id IN (${placeholders(ids)})`
+  ).bind(c.get('userId'), ...ids).all();
+  return results.length === new Set(ids).size;
+}
+
+/** Creates one pending job per platform and puts them on the queue. */
+async function queueJobs(c, campaignId, platformIds, action, payload = {}) {
+  const jobs = platformIds.map((platformId) => ({ id: crypto.randomUUID(), platformId }));
+
+  await c.env.DB.batch(jobs.map((job) =>
+    c.env.DB.prepare(`INSERT INTO jobs (id, campaign_id, platform_id, action, status, payload) VALUES (?, ?, ?, ?, 'pending', ?)`)
+      .bind(job.id, campaignId, job.platformId, action, JSON.stringify(payload))
+  ));
+
+  try {
+    await c.env.CAMPAIGN_QUEUE.sendBatch(jobs.map((job) => ({ body: { jobId: job.id } })));
+  } catch (error) {
+    await c.env.DB.batch(jobs.map((job) =>
+      c.env.DB.prepare(`UPDATE jobs SET status = 'failed', error_message = 'Could not queue the job' WHERE id = ?`).bind(job.id)
+    ));
+    throw error;
+  }
+  return jobs;
+}
+
+// List campaigns
 campaigns.get('/', async (c) => {
-  try {
-    const userId = c.get('userId');
-    const limit = parseInt(c.req.query('limit') || '50');
-    const offset = parseInt(c.req.query('offset') || '0');
-
-    const campaign = new Campaign(c.env.DB);
-    const userCampaigns = await campaign.findByUserId(userId, limit, offset);
-
-    return c.json({ campaigns: userCampaigns });
-  } catch (error) {
-    console.error('Get campaigns error:', error);
-    return c.json({ error: 'Failed to get campaigns' }, 500);
-  }
+  const { limit, offset } = getPagination(c);
+  const list = await new Campaign(c.env.DB).findByUserId(c.get('userId'), limit, offset);
+  return c.json({ campaigns: list });
 });
 
-// Get single campaign
+// One campaign, with its media and recent jobs (the UI polls this while publishing)
 campaigns.get('/:id', async (c) => {
-  try {
-    const userId = c.get('userId');
-    const campaignId = c.req.param('id');
+  const { campaign, response } = await loadOwned(c);
+  if (response) return response;
 
-    const campaign = new Campaign(c.env.DB);
-    const foundCampaign = await campaign.findById(campaignId);
+  const model = new Campaign(c.env.DB);
+  const media = (await model.getMedia(campaign.id)).map(({ r2_key, ...rest }) => rest);
+  const { results: jobs } = await c.env.DB.prepare(`
+    SELECT id, platform_id, action, status, error_message, retry_count, updated_at
+    FROM jobs WHERE campaign_id = ? ORDER BY created_at DESC LIMIT 20
+  `).bind(campaign.id).all();
 
-    if (!foundCampaign) {
-      return c.json({ error: 'Campaign not found' }, 404);
-    }
-
-    if (foundCampaign.user_id !== userId) {
-      return c.json({ error: 'Unauthorized' }, 403);
-    }
-
-    return c.json({ campaign: foundCampaign });
-  } catch (error) {
-    console.error('Get campaign error:', error);
-    return c.json({ error: 'Failed to get campaign' }, 500);
-  }
+  return c.json({ campaign, media, jobs });
 });
 
-// Create new campaign
-campaigns.post('/', async (c) => {
-  try {
-    const userId = c.get('userId');
-    const campaignData = await c.req.json();
+// Create
+campaigns.post('/', validateJson(campaignCreateSchema), async (c) => {
+  const userId = c.get('userId');
+  const data = c.get('body');
 
-    // Validate required fields
-    const { title, budget, platforms } = campaignData;
-    if (!title || !budget || !platforms || platforms.length === 0) {
-      return c.json({ error: 'Title, budget, and platforms are required' }, 400);
-    }
-
-    if (budget <= 0) {
-      return c.json({ error: 'Budget must be greater than 0' }, 400);
-    }
-
-    const campaign = new Campaign(c.env.DB);
-    const log = new Log(c.env.DB);
-
-    const newCampaign = await campaign.create(campaignData, userId);
-
-    await log.info('Campaign created', { 
-      campaignId: newCampaign.id,
-      title: newCampaign.title,
-      platforms: platforms.length
-    }, userId, newCampaign.id);
-
-    return c.json({ campaign: newCampaign }, 201);
-  } catch (error) {
-    console.error('Create campaign error:', error);
-    return c.json({ error: 'Failed to create campaign' }, 500);
+  if (!(await ownsAll(c, 'platforms', data.platforms))) {
+    return c.json({ error: 'One or more selected platforms were not found' }, 400);
   }
+  if (!(await ownsAll(c, 'media', data.mediaIds))) {
+    return c.json({ error: 'One or more selected media files were not found' }, 400);
+  }
+
+  const created = await new Campaign(c.env.DB).create(data, userId);
+  await new Log(c.env.DB).info('Campaign created', { campaignId: created.id, title: created.title, platforms: data.platforms.length }, userId, created.id);
+  return c.json({ campaign: created }, 201);
 });
 
-// Update campaign
-campaigns.put('/:id', async (c) => {
-  try {
-    const userId = c.get('userId');
-    const campaignId = c.req.param('id');
-    const updateData = await c.req.json();
+// Update the local campaign (what will be sent at the next publish)
+campaigns.put('/:id', validateJson(campaignUpdateSchema), async (c) => {
+  const { campaign, response } = await loadOwned(c);
+  if (response) return response;
 
-    const campaign = new Campaign(c.env.DB);
-    const existingCampaign = await campaign.findById(campaignId);
-
-    if (!existingCampaign) {
-      return c.json({ error: 'Campaign not found' }, 404);
-    }
-
-    if (existingCampaign.user_id !== userId) {
-      return c.json({ error: 'Unauthorized' }, 403);
-    }
-
-    const updatedCampaign = await campaign.update(campaignId, updateData);
-
-    const log = new Log(c.env.DB);
-    await log.info('Campaign updated', { 
-      campaignId: campaignId,
-      updates: Object.keys(updateData)
-    }, userId, campaignId);
-
-    return c.json({ campaign: updatedCampaign });
-  } catch (error) {
-    console.error('Update campaign error:', error);
-    return c.json({ error: 'Failed to update campaign' }, 500);
+  if (campaign.status === 'publishing') {
+    return c.json({ error: 'The campaign is being published. Try again in a moment.' }, 409);
   }
+  const patch = c.get('body');
+  if (patch.mediaIds && !(await ownsAll(c, 'media', patch.mediaIds))) {
+    return c.json({ error: 'One or more selected media files were not found' }, 400);
+  }
+
+  // The stored lifetime/end-date rule must still hold after a partial update
+  const budgetType = patch.budgetType ?? campaign.budget_type;
+  const scheduleEnd = 'scheduleEnd' in patch ? patch.scheduleEnd : campaign.schedule_end;
+  if (budgetType === 'lifetime' && !scheduleEnd) {
+    return c.json({ error: 'Validation failed', details: [{ field: 'scheduleEnd', message: 'A lifetime budget needs an end date' }] }, 400);
+  }
+
+  const updated = await new Campaign(c.env.DB).update(campaign.id, patch);
+  await new Log(c.env.DB).info('Campaign updated', { campaignId: campaign.id, updates: Object.keys(patch) }, c.get('userId'), campaign.id);
+
+  const published = campaign.platforms.some((p) => p.status === 'success');
+  return c.json({
+    campaign: updated,
+    ...(published ? { warning: 'Changes are saved here only. Ads that are already live on the platforms are not modified.' } : {}),
+  });
 });
 
-// Delete campaign
+// Delete
 campaigns.delete('/:id', async (c) => {
-  try {
-    const userId = c.get('userId');
-    const campaignId = c.req.param('id');
+  const { campaign, response } = await loadOwned(c);
+  if (response) return response;
 
-    const campaign = new Campaign(c.env.DB);
-    const existingCampaign = await campaign.findById(campaignId);
-
-    if (!existingCampaign) {
-      return c.json({ error: 'Campaign not found' }, 404);
-    }
-
-    if (existingCampaign.user_id !== userId) {
-      return c.json({ error: 'Unauthorized' }, 403);
-    }
-
-    await campaign.delete(campaignId);
-
-    const log = new Log(c.env.DB);
-    await log.info('Campaign deleted', { 
-      campaignId: campaignId,
-      title: existingCampaign.title
-    }, userId);
-
-    return c.json({ message: 'Campaign deleted successfully' });
-  } catch (error) {
-    console.error('Delete campaign error:', error);
-    return c.json({ error: 'Failed to delete campaign' }, 500);
+  // Deleting the record would orphan ads that keep spending money on the platforms
+  if (campaign.status === 'active' || campaign.status === 'publishing') {
+    return c.json({ error: 'Pause the campaign before deleting it, so no ads keep running on the platforms.' }, 409);
   }
+
+  await new Campaign(c.env.DB).delete(campaign.id);
+  await new Log(c.env.DB).info('Campaign deleted', { campaignId: campaign.id, title: campaign.title }, c.get('userId'));
+
+  const leftovers = campaign.platforms.some((p) => p.status === 'success');
+  return c.json({
+    message: 'Campaign deleted successfully',
+    ...(leftovers ? { warning: 'Paused ads may still exist in your ad accounts. Remove them there if you no longer need them.' } : {}),
+  });
 });
 
-// Publish campaign
+// Publish: creates the campaign on every selected platform (asynchronously, via the queue)
 campaigns.post('/:id/publish', async (c) => {
-  try {
-    const userId = c.get('userId');
-    const campaignId = c.req.param('id');
+  const { campaign, response } = await loadOwned(c);
+  if (response) return response;
 
-    const campaign = new Campaign(c.env.DB);
-    const foundCampaign = await campaign.findById(campaignId);
+  if (campaign.status === 'publishing') return c.json({ error: 'This campaign is already being published' }, 409);
 
-    if (!foundCampaign) {
-      return c.json({ error: 'Campaign not found' }, 404);
-    }
-
-    if (foundCampaign.user_id !== userId) {
-      return c.json({ error: 'Unauthorized' }, 403);
-    }
-
-    if (foundCampaign.status === 'active') {
-      return c.json({ error: 'Campaign is already active' }, 400);
-    }
-
-    // Update campaign status
-    await campaign.update(campaignId, { status: 'active' });
-
-    // Create jobs for each platform
-    const platforms = foundCampaign.platforms || [];
-    const jobs = [];
-
-    for (const platform of platforms) {
-      const jobData = {
-        campaignId,
-        platformId: platform.platformId,
-        action: 'publish',
-        payload: {
-          campaign: foundCampaign,
-          platform
-        }
-      };
-
-      // Send to queue
-      await c.env.CAMPAIGN_QUEUE.send(JSON.stringify(jobData));
-      
-      jobs.push({
-        platformId: platform.platformId,
-        platformName: platform.platformName,
-        status: 'queued'
-      });
-    }
-
-    const log = new Log(c.env.DB);
-    await log.info('Campaign published', { 
-      campaignId: campaignId,
-      platformsCount: platforms.length,
-      jobs: jobs.length
-    }, userId, campaignId);
-
-    return c.json({ 
-      message: 'Campaign published successfully',
-      jobs
-    });
-  } catch (error) {
-    console.error('Publish campaign error:', error);
-    return c.json({ error: 'Failed to publish campaign' }, 500);
+  const missing = [
+    ['headline', campaign.headline],
+    ['ad text', campaign.ad_copy],
+    ['destination URL', campaign.destination_url],
+  ].filter(([, value]) => !value).map(([label]) => label);
+  if (missing.length > 0) {
+    return c.json({ error: `Complete the creative first: missing ${missing.join(', ')}` }, 400);
   }
+
+  const targets = campaign.platforms.filter((p) => p.status !== 'success');
+  if (campaign.platforms.length === 0) return c.json({ error: 'The campaign has no platforms' }, 400);
+  if (targets.length === 0) return c.json({ error: 'The campaign is already published on all its platforms' }, 409);
+
+  const { results: connected } = await c.env.DB.prepare(
+    `SELECT id, name FROM platforms WHERE user_id = ? AND is_connected = 1 AND id IN (${placeholders(targets)})`
+  ).bind(c.get('userId'), ...targets.map((p) => p.platformId)).all();
+  const connectedIds = new Set(connected.map((p) => p.id));
+  const disconnected = targets.filter((p) => !connectedIds.has(p.platformId)).map((p) => p.platformName);
+  if (disconnected.length > 0) {
+    return c.json({ error: `Reconnect these platforms first: ${disconnected.join(', ')}` }, 400);
+  }
+
+  const platformIds = targets.map((p) => p.platformId);
+  await c.env.DB.prepare(
+    `UPDATE campaign_platforms SET status = 'pending', error_message = NULL, updated_at = CURRENT_TIMESTAMP
+     WHERE campaign_id = ? AND platform_id IN (${placeholders(platformIds)})`
+  ).bind(campaign.id, ...platformIds).run();
+  await new Campaign(c.env.DB).setStatus(campaign.id, 'publishing');
+
+  let jobs;
+  try {
+    jobs = await queueJobs(c, campaign.id, platformIds, 'publish');
+  } catch (error) {
+    await new Campaign(c.env.DB).setStatus(campaign.id, 'draft');
+    console.error('Queueing publish jobs failed:', error);
+    return c.json({ error: 'Could not start publishing. Please try again.' }, 503);
+  }
+
+  await new Log(c.env.DB).info('Campaign publish started', { campaignId: campaign.id, platforms: platformIds.length }, c.get('userId'), campaign.id);
+
+  return c.json({
+    message: campaign.publish_paused
+      ? 'Publishing started. Ads are created paused on the platforms; activate them when ready.'
+      : 'Publishing started.',
+    jobs: jobs.map((j) => ({ id: j.id, platformId: j.platformId })),
+  }, 202);
 });
 
-// Duplicate campaign
-campaigns.post('/:id/duplicate', async (c) => {
-  try {
-    const userId = c.get('userId');
-    const campaignId = c.req.param('id');
-    const { newTitle } = await c.req.json();
+// Activate / pause what was published (turns the real ads on or off)
+for (const [action, status] of [['activate', 'active'], ['pause', 'paused']]) {
+  campaigns.post(`/:id/${action}`, async (c) => {
+    const { campaign, response } = await loadOwned(c);
+    if (response) return response;
 
-    if (!newTitle) {
-      return c.json({ error: 'New title is required' }, 400);
-    }
+    if (campaign.status === 'publishing') return c.json({ error: 'The campaign is still being published' }, 409);
+    const published = campaign.platforms.filter((p) => p.status === 'success');
+    if (published.length === 0) return c.json({ error: 'Publish the campaign first' }, 400);
 
-    const campaign = new Campaign(c.env.DB);
-    const existingCampaign = await campaign.findById(campaignId);
+    const jobs = await queueJobs(c, campaign.id, published.map((p) => p.platformId), 'set_status', { status });
+    await new Log(c.env.DB).info(`Campaign ${action} requested`, { campaignId: campaign.id }, c.get('userId'), campaign.id);
+    return c.json({ message: `${action === 'activate' ? 'Activation' : 'Pause'} requested`, jobs: jobs.map((j) => ({ id: j.id, platformId: j.platformId })) }, 202);
+  });
+}
 
-    if (!existingCampaign) {
-      return c.json({ error: 'Campaign not found' }, 404);
-    }
-
-    if (existingCampaign.user_id !== userId) {
-      return c.json({ error: 'Unauthorized' }, 403);
-    }
-
-    const duplicatedCampaign = await campaign.duplicate(campaignId, newTitle);
-
-    const log = new Log(c.env.DB);
-    await log.info('Campaign duplicated', { 
-      originalCampaignId: campaignId,
-      newCampaignId: duplicatedCampaign.id,
-      newTitle
-    }, userId, duplicatedCampaign.id);
-
-    return c.json({ campaign: duplicatedCampaign }, 201);
-  } catch (error) {
-    console.error('Duplicate campaign error:', error);
-    return c.json({ error: 'Failed to duplicate campaign' }, 500);
-  }
+// Pull fresh performance numbers now
+campaigns.post('/:id/sync-metrics', async (c) => {
+  const { campaign, response } = await loadOwned(c);
+  if (response) return response;
+  const queued = await enqueueMetricsSync(c.env, { userId: c.get('userId'), campaignId: campaign.id });
+  return c.json({ queued }, 202);
 });
 
-// Get campaign media
+// Duplicate
+campaigns.post('/:id/duplicate', validateJson(campaignDuplicateSchema), async (c) => {
+  const { campaign, response } = await loadOwned(c);
+  if (response) return response;
+
+  const copy = await new Campaign(c.env.DB).duplicate(campaign.id, c.get('body').newTitle);
+  await new Log(c.env.DB).info('Campaign duplicated', { originalId: campaign.id, newId: copy.id }, c.get('userId'), copy.id);
+  return c.json({ campaign: copy }, 201);
+});
+
+// Media attached to a campaign
 campaigns.get('/:id/media', async (c) => {
-  try {
-    const userId = c.get('userId');
-    const campaignId = c.req.param('id');
-
-    const campaign = new Campaign(c.env.DB);
-    const existingCampaign = await campaign.findById(campaignId);
-
-    if (!existingCampaign) {
-      return c.json({ error: 'Campaign not found' }, 404);
-    }
-
-    if (existingCampaign.user_id !== userId) {
-      return c.json({ error: 'Unauthorized' }, 403);
-    }
-
-    const media = await campaign.getMedia(campaignId);
-
-    return c.json({ media });
-  } catch (error) {
-    console.error('Get campaign media error:', error);
-    return c.json({ error: 'Failed to get campaign media' }, 500);
-  }
+  const { campaign, response } = await loadOwned(c);
+  if (response) return response;
+  const media = (await new Campaign(c.env.DB).getMedia(campaign.id)).map(({ r2_key, ...rest }) => rest);
+  return c.json({ media });
 });
 
 export { campaigns as campaignRoutes };

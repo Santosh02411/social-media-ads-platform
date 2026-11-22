@@ -1,6 +1,10 @@
 import { Hono } from 'hono';
 import { Media } from '../models/Media.js';
 import { Log } from '../models/Log.js';
+import { validateJson } from '../middleware/validate.js';
+import { getPagination, getBoundedInt } from '../utils/http.js';
+import { mediaLinkSchema } from '../validation/schemas.js';
+import { signMediaUrl, verifyMediaSignature } from '../utils/mediaUrls.js';
 
 const media = new Hono();
 
@@ -8,8 +12,7 @@ const media = new Hono();
 media.get('/', async (c) => {
   try {
     const userId = c.get('userId');
-    const limit = parseInt(c.req.query('limit') || '50');
-    const offset = parseInt(c.req.query('offset') || '0');
+    const { limit, offset } = getPagination(c);
     const search = c.req.query('search');
 
     const mediaModel = new Media(c.env.DB, c.env.MEDIA_BUCKET);
@@ -28,6 +31,14 @@ media.get('/', async (c) => {
   }
 });
 
+// Stream the file to its owner (used by <img>/<video> in the dashboard)
+media.get('/:id/file', async (c) => {
+  const mediaModel = new Media(c.env.DB, c.env.MEDIA_BUCKET);
+  const mediaFile = await mediaModel.findById(c.req.param('id'));
+  if (!mediaFile || mediaFile.user_id !== c.get('userId')) return c.json({ error: 'Media not found' }, 404);
+  return streamMedia(c, mediaFile);
+});
+
 // Get single media file
 media.get('/:id', async (c) => {
   try {
@@ -42,7 +53,7 @@ media.get('/:id', async (c) => {
     }
 
     if (mediaFile.user_id !== userId) {
-      return c.json({ error: 'Unauthorized' }, 403);
+      return c.json({ error: 'Media not found' }, 404);
     }
 
     return c.json({ media: mediaFile });
@@ -119,7 +130,7 @@ media.delete('/:id', async (c) => {
     }
 
     if (mediaFile.user_id !== userId) {
-      return c.json({ error: 'Unauthorized' }, 403);
+      return c.json({ error: 'Media not found' }, 404);
     }
 
     await mediaModel.delete(mediaId, userId);
@@ -137,20 +148,11 @@ media.delete('/:id', async (c) => {
 });
 
 // Link media to campaign
-media.post('/:id/link-to-campaign', async (c) => {
+media.post('/:id/link-to-campaign', validateJson(mediaLinkSchema), async (c) => {
   try {
     const userId = c.get('userId');
     const mediaId = c.req.param('id');
-    const { campaignId, mediaType, adCopy } = await c.req.json();
-
-    if (!campaignId || !mediaType) {
-      return c.json({ error: 'Campaign ID and media type are required' }, 400);
-    }
-
-    const validTypes = ['image', 'video', 'text'];
-    if (!validTypes.includes(mediaType)) {
-      return c.json({ error: 'Invalid media type' }, 400);
-    }
+    const { campaignId, mediaType, adCopy } = c.get('body');
 
     const mediaModel = new Media(c.env.DB, c.env.MEDIA_BUCKET);
     const log = new Log(c.env.DB);
@@ -162,7 +164,7 @@ media.post('/:id/link-to-campaign', async (c) => {
     }
 
     if (mediaFile.user_id !== userId) {
-      return c.json({ error: 'Unauthorized' }, 403);
+      return c.json({ error: 'Media not found' }, 404);
     }
 
     // Check if campaign exists and user owns it
@@ -210,7 +212,7 @@ media.delete('/:id/unlink-from-campaign', async (c) => {
     }
 
     if (mediaFile.user_id !== userId) {
-      return c.json({ error: 'Unauthorized' }, 403);
+      return c.json({ error: 'Media not found' }, 404);
     }
 
     // Check if campaign exists and user owns it
@@ -241,21 +243,17 @@ media.get('/:id/signed-url', async (c) => {
   try {
     const userId = c.get('userId');
     const mediaId = c.req.param('id');
-    const expiresIn = parseInt(c.req.query('expiresIn') || '3600');
+    const expiresIn = getBoundedInt(c, 'expiresIn', { fallback: 3600, min: 60, max: 86400 });
 
     const mediaModel = new Media(c.env.DB, c.env.MEDIA_BUCKET);
 
     // Check if media exists and user owns it
     const mediaFile = await mediaModel.findById(mediaId);
-    if (!mediaFile) {
+    if (!mediaFile || mediaFile.user_id !== userId) {
       return c.json({ error: 'Media not found' }, 404);
     }
 
-    if (mediaFile.user_id !== userId) {
-      return c.json({ error: 'Unauthorized' }, 403);
-    }
-
-    const signedUrl = await mediaModel.getSignedUrl(mediaId, expiresIn);
+    const signedUrl = await signMediaUrl(c.env, mediaId, expiresIn);
 
     return c.json({ signedUrl });
   } catch (error) {
@@ -280,3 +278,30 @@ media.get('/stats/summary', async (c) => {
 });
 
 export { media as mediaRoutes };
+
+/** Streams an R2 object with safe headers (no sniffing, no inline scripts). */
+export async function streamMedia(c, mediaFile) {
+  const object = await c.env.MEDIA_BUCKET.get(mediaFile.r2_key);
+  if (!object) return c.json({ error: 'File not found' }, 404);
+  return new Response(object.body, {
+    headers: {
+      'Content-Type': mediaFile.mime_type,
+      'Content-Length': String(object.size),
+      'X-Content-Type-Options': 'nosniff',
+      'Content-Security-Policy': "default-src 'none'; sandbox",
+      'Cache-Control': 'private, max-age=300',
+      'Cross-Origin-Resource-Policy': 'cross-origin',
+    },
+  });
+}
+
+// Public, HMAC-signed download used by ad platforms (no cookie needed)
+export const publicMediaRoutes = new Hono();
+publicMediaRoutes.get('/:id', async (c) => {
+  const id = c.req.param('id');
+  const { exp, sig } = c.req.query();
+  if (!(await verifyMediaSignature(c.env, id, exp, sig))) return c.json({ error: 'Invalid or expired link' }, 403);
+  const mediaFile = await new Media(c.env.DB, c.env.MEDIA_BUCKET).findById(id);
+  if (!mediaFile) return c.json({ error: 'Media not found' }, 404);
+  return streamMedia(c, mediaFile);
+});

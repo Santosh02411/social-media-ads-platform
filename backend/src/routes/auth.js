@@ -1,167 +1,123 @@
 import { Hono } from 'hono';
-import { User } from '../models/User.js';
+import { User, DUMMY_HASH } from '../models/User.js';
 import { Log } from '../models/Log.js';
+import bcrypt from 'bcryptjs';
+import { authMiddleware } from '../middleware/auth.js';
+import { validateJson } from '../middleware/validate.js';
+import {
+  rateLimit,
+  isLoginLocked,
+  recordFailedLogin,
+  clearFailedLogins,
+  LOGIN_LOCK_SECONDS,
+} from '../middleware/rateLimit.js';
+import {
+  createSession,
+  readSession,
+  destroySession,
+  clearSessionCookie,
+} from '../utils/session.js';
+import { loginSchema, registerSchema } from '../validation/schemas.js';
 
 const auth = new Hono();
 
-// Register endpoint
-auth.post('/register', async (c) => {
-  try {
-    const { email, password, name } = await c.req.json();
-    
-    if (!email || !password) {
-      return c.json({ error: 'Email and password are required' }, 400);
-    }
+// Register: no session is created; the user signs in afterwards.
+auth.post(
+  '/register',
+  rateLimit({ name: 'register', limit: 5, windowSeconds: 60 * 60 }),
+  validateJson(registerSchema),
+  async (c) => {
+    const { email, password, name } = c.get('body');
+    const users = new User(c.env.DB);
 
-    if (password.length < 6) {
-      return c.json({ error: 'Password must be at least 6 characters' }, 400);
-    }
-
-    const user = new User(c.env.DB);
-    const log = new Log(c.env.DB);
-
-    const existingUser = await user.findByEmail(email);
-    if (existingUser) {
+    if (await users.findByEmail(email)) {
       return c.json({ error: 'Email already exists' }, 409);
     }
 
-    const newUser = await user.create({ email, password, name });
-    
-    await log.info('User registered successfully', { userId: newUser.id }, newUser.id);
-
-    const token = await user.generateToken(newUser, c.env.JWT_SECRET);
-
-    return c.json({
-      user: {
-        id: newUser.id,
-        email: newUser.email,
-        name: newUser.name
-      },
-      token
-    }, 201);
-  } catch (error) {
-    console.error('Registration error:', error);
-    return c.json({ error: 'Registration failed' }, 500);
-  }
-});
-
-// Login endpoint
-auth.post('/login', async (c) => {
-  try {
-    const { email, password } = await c.req.json();
-    
-    if (!email || !password) {
-      return c.json({ error: 'Email and password are required' }, 400);
-    }
-
-    const user = new User(c.env.DB);
-    const log = new Log(c.env.DB);
-
-    const foundUser = await user.findByEmail(email);
-    if (!foundUser) {
-      return c.json({ error: 'Invalid credentials' }, 401);
-    }
-
-    const isValidPassword = await user.verifyPassword(foundUser, password);
-    if (!isValidPassword) {
-      return c.json({ error: 'Invalid credentials' }, 401);
-    }
-
-    // Store session in KV
-    const sessionData = {
-      userId: foundUser.id,
-      email: foundUser.email,
-      loginTime: new Date().toISOString()
-    };
-    
-    await c.env.SESSIONS.put(`session:${foundUser.id}`, JSON.stringify(sessionData), {
-      expirationTtl: 7 * 24 * 60 * 60 // 7 days
-    });
-
-    await log.info('User logged in successfully', { userId: foundUser.id }, foundUser.id);
-
-    const token = await user.generateToken(foundUser, c.env.JWT_SECRET);
-
-    return c.json({
-      user: {
-        id: foundUser.id,
-        email: foundUser.email,
-        name: foundUser.name
-      },
-      token
-    });
-  } catch (error) {
-    console.error('Login error:', error);
-    return c.json({ error: 'Login failed' }, 500);
-  }
-});
-
-// Logout endpoint
-auth.post('/logout', async (c) => {
-  try {
-    const userId = c.get('userId');
-    
-    if (userId) {
-      // Remove session from KV
-      await c.env.SESSIONS.delete(`session:${userId}`);
-      
-      const log = new Log(c.env.DB);
-      await log.info('User logged out', { userId }, userId);
-    }
-
-    return c.json({ message: 'Logged out successfully' });
-  } catch (error) {
-    console.error('Logout error:', error);
-    return c.json({ error: 'Logout failed' }, 500);
-  }
-});
-
-// Get current user
-auth.get('/me', async (c) => {
-  try {
-    const userId = c.get('userId');
-    const email = c.get('email');
-
-    if (!userId) {
-      return c.json({ error: 'Not authenticated' }, 401);
-    }
-
-    return c.json({
-      user: {
-        id: userId,
-        email: email,
-        name: c.get('name')
+    let newUser;
+    try {
+      newUser = await users.create({ email, password, name });
+    } catch (error) {
+      // Lost a race with a concurrent registration of the same email
+      if (error.message === 'Email already exists') {
+        return c.json({ error: 'Email already exists' }, 409);
       }
-    });
-  } catch (error) {
-    console.error('Get user error:', error);
-    return c.json({ error: 'Failed to get user info' }, 500);
+      throw error;
+    }
+
+    await new Log(c.env.DB).info('User registered', { userId: newUser.id }, newUser.id);
+
+    return c.json({ user: { id: newUser.id, email: newUser.email, name: newUser.name } }, 201);
   }
+);
+
+// Login: sets an httpOnly session cookie. The token is never put in the response body.
+auth.post(
+  '/login',
+  rateLimit({ name: 'login', limit: 20, windowSeconds: 15 * 60 }),
+  validateJson(loginSchema),
+  async (c) => {
+    const { email, password } = c.get('body');
+
+    if (await isLoginLocked(c.env, email)) {
+      c.header('Retry-After', String(LOGIN_LOCK_SECONDS));
+      return c.json({ error: 'Too many failed attempts. Please try again later.' }, 429);
+    }
+
+    const users = new User(c.env.DB);
+    const foundUser = await users.findByEmail(email);
+
+    // Same work and same message whether or not the account exists
+    let valid = false;
+    if (foundUser) {
+      valid = await users.verifyPassword(foundUser, password);
+    } else {
+      await bcrypt.compare(password, DUMMY_HASH);
+    }
+
+    if (!valid) {
+      await recordFailedLogin(c.env, email);
+      return c.json({ error: 'Invalid email or password' }, 401);
+    }
+
+    await clearFailedLogins(c.env, email);
+    await createSession(c, foundUser);
+    await new Log(c.env.DB).info('User logged in', { userId: foundUser.id }, foundUser.id);
+
+    return c.json({ user: { id: foundUser.id, email: foundUser.email, name: foundUser.name } });
+  }
+);
+
+// Logout: always clears the cookie; revokes the server-side session if there is one.
+auth.post('/logout', async (c) => {
+  const session = await readSession(c);
+  if (session) {
+    await destroySession(c.env, session.sessionId);
+    await new Log(c.env.DB).info('User logged out', { userId: session.userId }, session.userId);
+  }
+  clearSessionCookie(c);
+  return c.json({ message: 'Logged out successfully' });
 });
 
-// Refresh token endpoint
-auth.post('/refresh', async (c) => {
-  try {
-    const userId = c.get('userId');
-    
-    if (!userId) {
-      return c.json({ error: 'Not authenticated' }, 401);
-    }
-
-    const user = new User(c.env.DB);
-    const foundUser = await user.findById(userId);
-    
-    if (!foundUser) {
-      return c.json({ error: 'User not found' }, 404);
-    }
-
-    const token = await user.generateToken(foundUser, c.env.JWT_SECRET);
-
-    return c.json({ token });
-  } catch (error) {
-    console.error('Token refresh error:', error);
-    return c.json({ error: 'Token refresh failed' }, 500);
+// Current user (used by the frontend to find out whether it is signed in)
+auth.get('/me', authMiddleware, async (c) => {
+  const user = await new User(c.env.DB).findById(c.get('userId'));
+  if (!user) {
+    await destroySession(c.env, c.get('sessionId'));
+    clearSessionCookie(c);
+    return c.json({ error: 'Authentication required' }, 401);
   }
+  return c.json({ user: { id: user.id, email: user.email, name: user.name } });
+});
+
+// Rotate the session: new id + fresh expiry, old one revoked.
+auth.post('/refresh', authMiddleware, async (c) => {
+  const user = await new User(c.env.DB).findById(c.get('userId'));
+  if (!user) return c.json({ error: 'Authentication required' }, 401);
+
+  await destroySession(c.env, c.get('sessionId'));
+  await createSession(c, user);
+  return c.json({ message: 'Session refreshed' });
 });
 
 export { auth as authRoutes };

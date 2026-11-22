@@ -1,4 +1,5 @@
 import { Hono } from 'hono';
+import { getPagination } from '../utils/http.js';
 import { Log } from '../models/Log.js';
 import { Campaign } from '../models/Campaign.js';
 
@@ -36,10 +37,10 @@ status.get('/overview', async (c) => {
     const jobStats = await c.env.DB.prepare(`
       SELECT 
         COUNT(*) as total_jobs,
-        COUNT(CASE WHEN status = 'pending' THEN 1 END) as pending_jobs,
-        COUNT(CASE WHEN status = 'processing' THEN 1 END) as processing_jobs,
-        COUNT(CASE WHEN status = 'success' THEN 1 END) as success_jobs,
-        COUNT(CASE WHEN status = 'failed' THEN 1 END) as failed_jobs
+        COUNT(CASE WHEN j.status = 'pending' THEN 1 END) as pending_jobs,
+        COUNT(CASE WHEN j.status = 'processing' THEN 1 END) as processing_jobs,
+        COUNT(CASE WHEN j.status = 'success' THEN 1 END) as success_jobs,
+        COUNT(CASE WHEN j.status = 'failed' THEN 1 END) as failed_jobs
       FROM jobs j
       JOIN campaigns c ON j.campaign_id = c.id
       WHERE c.user_id = ?
@@ -52,7 +53,7 @@ status.get('/overview', async (c) => {
       WHERE user_id = ?
       ORDER BY created_at DESC
       LIMIT 10
-    `).bind(userId).all();
+    `).bind(userId).all().then((r) => r.results);
 
     return c.json({
       campaigns: campaignStats,
@@ -81,7 +82,7 @@ status.get('/campaigns/:id', async (c) => {
     }
 
     if (campaignData.user_id !== userId) {
-      return c.json({ error: 'Unauthorized' }, 403);
+      return c.json({ error: 'Campaign not found' }, 404);
     }
 
     // Get platform-specific status
@@ -100,7 +101,7 @@ status.get('/campaigns/:id', async (c) => {
       JOIN platforms p ON cp.platform_id = p.id
       WHERE cp.campaign_id = ?
       ORDER BY cp.created_at DESC
-    `).bind(campaignId).all();
+    `).bind(campaignId).all().then((r) => r.results);
 
     // Get job history
     const jobHistory = await c.env.DB.prepare(`
@@ -117,7 +118,7 @@ status.get('/campaigns/:id', async (c) => {
       WHERE campaign_id = ?
       ORDER BY created_at DESC
       LIMIT 20
-    `).bind(campaignId).all();
+    `).bind(campaignId).all().then((r) => r.results);
 
     // Get recent logs
     const recentLogs = await c.env.DB.prepare(`
@@ -126,7 +127,7 @@ status.get('/campaigns/:id', async (c) => {
       WHERE campaign_id = ?
       ORDER BY created_at DESC
       LIMIT 10
-    `).bind(campaignId).all();
+    `).bind(campaignId).all().then((r) => r.results);
 
     return c.json({
       campaign: campaignData,
@@ -172,7 +173,7 @@ status.get('/platforms/:id', async (c) => {
       WHERE cp.platform_id = ?
       ORDER BY cp.created_at DESC
       LIMIT 20
-    `).bind(platformId).all();
+    `).bind(platformId).all().then((r) => r.results);
 
     // Get recent logs for this platform
     const recentLogs = await c.env.DB.prepare(`
@@ -181,7 +182,7 @@ status.get('/platforms/:id', async (c) => {
       WHERE platform_id = ?
       ORDER BY created_at DESC
       LIMIT 10
-    `).bind(platformId).all();
+    `).bind(platformId).all().then((r) => r.results);
 
     return c.json({
       platform,
@@ -198,8 +199,7 @@ status.get('/platforms/:id', async (c) => {
 status.get('/jobs', async (c) => {
   try {
     const userId = c.get('userId');
-    const limit = parseInt(c.req.query('limit') || '50');
-    const offset = parseInt(c.req.query('offset') || '0');
+    const { limit, offset } = getPagination(c);
     const status = c.req.query('status');
 
     let query = `
@@ -232,7 +232,7 @@ status.get('/jobs', async (c) => {
     query += ` ORDER BY j.created_at DESC LIMIT ? OFFSET ?`;
     params.push(limit, offset);
 
-    const jobs = await c.env.DB.prepare(query).bind(...params).all();
+    const jobs = await c.env.DB.prepare(query).bind(...params).all().then((r) => r.results);
 
     return c.json({ jobs });
   } catch (error) {
@@ -245,8 +245,7 @@ status.get('/jobs', async (c) => {
 status.get('/logs', async (c) => {
   try {
     const userId = c.get('userId');
-    const limit = parseInt(c.req.query('limit') || '100');
-    const offset = parseInt(c.req.query('offset') || '0');
+    const { limit, offset } = getPagination(c, { defaultLimit: 100 });
     const level = c.req.query('level');
     const campaignId = c.req.query('campaignId');
     const platformId = c.req.query('platformId');
@@ -277,7 +276,7 @@ status.get('/logs', async (c) => {
     query += ` ORDER BY created_at DESC LIMIT ? OFFSET ?`;
     params.push(limit, offset);
 
-    const logs = await c.env.DB.prepare(query).bind(...params).all();
+    const logs = await c.env.DB.prepare(query).bind(...params).all().then((r) => r.results);
 
     // Parse context for each log
     const parsedLogs = logs.map(log => ({
@@ -311,37 +310,36 @@ status.post('/jobs/:id/retry', async (c) => {
     }
 
     if (job.user_id !== userId) {
-      return c.json({ error: 'Unauthorized' }, 403);
+      return c.json({ error: 'Job not found' }, 404);
     }
 
     if (job.status !== 'failed') {
       return c.json({ error: 'Only failed jobs can be retried' }, 400);
     }
 
-    // Update job status
+    // Fresh attempt budget; the worker rebuilds everything from the database
     await c.env.DB.prepare(`
-      UPDATE jobs 
-      SET status = 'pending', 
-          retry_count = retry_count + 1,
+      UPDATE jobs
+      SET status = 'pending',
+          retry_count = 0,
           error_message = NULL,
           updated_at = CURRENT_TIMESTAMP
       WHERE id = ?
     `).bind(jobId).run();
 
-    // Resend to queue
-    const jobData = {
-      campaignId: job.campaign_id,
-      platformId: job.platform_id,
-      action: job.action,
-      payload: JSON.parse(job.payload || '{}')
-    };
+    if (job.action === 'publish') {
+      await c.env.DB.prepare(`
+        UPDATE campaign_platforms SET status = 'pending', error_message = NULL, updated_at = CURRENT_TIMESTAMP
+        WHERE campaign_id = ? AND platform_id = ?
+      `).bind(job.campaign_id, job.platform_id).run();
+    }
 
-    await c.env.CAMPAIGN_QUEUE.send(JSON.stringify(jobData));
+    await c.env.CAMPAIGN_QUEUE.send({ jobId });
 
     const log = new Log(c.env.DB);
     await log.info('Job retried', { 
       jobId: jobId,
-      retryCount: job.retry_count + 1
+      retryCount: 0
     }, userId, job.campaign_id, job.platform_id);
 
     return c.json({ message: 'Job retried successfully' });

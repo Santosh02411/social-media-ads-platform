@@ -1,331 +1,280 @@
 import { Hono } from 'hono';
 import { Platform } from '../models/Platform.js';
 import { Log } from '../models/Log.js';
+import { validateJson, parseWith } from '../middleware/validate.js';
+import {
+  accountSelectSchema,
+  credentialSchemaFor,
+  platformCreateSchema,
+  platformUpdateSchema,
+} from '../validation/schemas.js';
+import { adapterFactory, SUPPORTED_PLATFORMS } from '../adapters/AdapterFactory.js';
+import { PlatformError } from '../adapters/http.js';
+import { getEndpoints, isSandbox } from '../adapters/endpoints.js';
+import { buildAuthUrl, oauthConfigured, OAUTH_STATE_TTL_SECONDS } from '../services/oauth.js';
+import { randomHex } from '../utils/crypto.js';
 
 const platforms = new Hono();
 
-// Get all platforms for user
+const model = (c) => new Platform(c.env.DB, c.env.ENCRYPTION_KEY);
+
+/** Loads a platform and checks it belongs to the signed-in user. */
+async function loadOwned(c) {
+  const platform = await model(c).findById(c.req.param('id'));
+  // Same answer for "missing" and "someone else's" so ids can't be probed
+  if (!platform || platform.user_id !== c.get('userId')) {
+    return { response: c.json({ error: 'Platform not found' }, 404) };
+  }
+  return { platform };
+}
+
+/** Turns a platform failure into an HTTP response the UI can show. */
+function platformFailure(c, error) {
+  if (error instanceof PlatformError) {
+    const status = error.retryable ? 502 : 400;
+    return c.json({ error: error.message, code: error.code }, status);
+  }
+  throw error;
+}
+
+/** Checks credentials against the real platform API. */
+async function validateAgainstPlatform(c, platform, config) {
+  const adapter = adapterFactory.create({ ...platform, config }, c.env);
+  return adapter.validateCredentials();
+}
+
+// Which providers can use "Connect with ..." and whether we are talking to a sandbox
+platforms.get('/providers', (c) => {
+  const ep = getEndpoints(c.env);
+  const providers = {};
+  for (const type of SUPPORTED_PLATFORMS) providers[type] = { oauth: oauthConfigured(c.env, type) };
+  const sandbox = isSandbox(c.env);
+  return c.json({ providers, sandbox, apiVersions: { meta: ep.metaVersion, googleAds: ep.googleAdsVersion } });
+});
+
+// List the user's platforms (credentials are never returned)
 platforms.get('/', async (c) => {
-  try {
-    const userId = c.get('userId');
-
-    const platform = new Platform(c.env.DB);
-    const userPlatforms = await platform.findByUserId(userId);
-
-    return c.json({ platforms: userPlatforms });
-  } catch (error) {
-    console.error('Get platforms error:', error);
-    return c.json({ error: 'Failed to get platforms' }, 500);
-  }
+  const list = await model(c).findByUserId(c.get('userId'));
+  return c.json({ platforms: list.map(Platform.toPublic) });
 });
 
-// Get connected platforms
 platforms.get('/connected', async (c) => {
-  try {
-    const userId = c.get('userId');
-
-    const platform = new Platform(c.env.DB);
-    const connectedPlatforms = await platform.getConnectedPlatforms(userId);
-
-    return c.json({ platforms: connectedPlatforms });
-  } catch (error) {
-    console.error('Get connected platforms error:', error);
-    return c.json({ error: 'Failed to get connected platforms' }, 500);
-  }
+  const list = await model(c).getConnectedPlatforms(c.get('userId'));
+  return c.json({ platforms: list.map(Platform.toPublic) });
 });
 
-// Get single platform
 platforms.get('/:id', async (c) => {
-  try {
-    const userId = c.get('userId');
-    const platformId = c.req.param('id');
-
-    const platform = new Platform(c.env.DB);
-    const foundPlatform = await platform.findById(platformId);
-
-    if (!foundPlatform) {
-      return c.json({ error: 'Platform not found' }, 404);
-    }
-
-    if (foundPlatform.user_id !== userId) {
-      return c.json({ error: 'Unauthorized' }, 403);
-    }
-
-    return c.json({ platform: foundPlatform });
-  } catch (error) {
-    console.error('Get platform error:', error);
-    return c.json({ error: 'Failed to get platform' }, 500);
-  }
+  const { platform, response } = await loadOwned(c);
+  if (response) return response;
+  return c.json({ platform: Platform.toPublic(platform) });
 });
 
-// Create new platform
-platforms.post('/', async (c) => {
-  try {
-    const userId = c.get('userId');
-    console.log('User ID from context:', userId);
-    const platformData = await c.req.json();
+platforms.post('/', validateJson(platformCreateSchema), async (c) => {
+  const userId = c.get('userId');
+  const created = await model(c).create(c.get('body'), userId);
 
-    // Validate required fields
-    const { name, type, config } = platformData;
-    if (!name || !type) {
-      return c.json({ error: 'Name and type are required' }, 400);
-    }
+  await new Log(c.env.DB).info(
+    'Platform created',
+    { platformId: created.id, name: created.name, type: created.type },
+    userId,
+    null,
+    created.id
+  );
 
-    const validTypes = ['facebook', 'google', 'tiktok', 'instagram'];
-    if (!validTypes.includes(type)) {
-      return c.json({ error: 'Invalid platform type' }, 400);
-    }
-
-    const platform = new Platform(c.env.DB);
-    const log = new Log(c.env.DB);
-
-    const newPlatform = await platform.create(platformData, userId);
-
-    await log.info('Platform created', { 
-      platformId: newPlatform.id,
-      name: newPlatform.name,
-      type: newPlatform.type
-    }, userId, null, newPlatform.id);
-
-    return c.json({ platform: newPlatform }, 201);
-  } catch (error) {
-    console.error('Create platform error:', error);
-    return c.json({ 
-      error: 'Failed to create platform',
-      message: error.message 
-    }, 500);
-  }
+  return c.json({ platform: Platform.toPublic(created) }, 201);
 });
 
-// Update platform
-platforms.put('/:id', async (c) => {
-  try {
-    const userId = c.get('userId');
-    const platformId = c.req.param('id');
-    const updateData = await c.req.json();
+platforms.put('/:id', validateJson(platformUpdateSchema), async (c) => {
+  const { platform, response } = await loadOwned(c);
+  if (response) return response;
 
-    const platform = new Platform(c.env.DB);
-    const existingPlatform = await platform.findById(platformId);
+  const updated = await model(c).rename(platform.id, c.get('body').name);
 
-    if (!existingPlatform) {
-      return c.json({ error: 'Platform not found' }, 404);
-    }
+  await new Log(c.env.DB).info(
+    'Platform updated',
+    { platformId: platform.id, updates: ['name'] },
+    c.get('userId'),
+    null,
+    platform.id
+  );
 
-    if (existingPlatform.user_id !== userId) {
-      return c.json({ error: 'Unauthorized' }, 403);
-    }
-
-    const updatedPlatform = await platform.update(platformId, updateData);
-
-    const log = new Log(c.env.DB);
-    await log.info('Platform updated', { 
-      platformId: platformId,
-      updates: Object.keys(updateData)
-    }, userId, null, platformId);
-
-    return c.json({ platform: updatedPlatform });
-  } catch (error) {
-    console.error('Update platform error:', error);
-    return c.json({ error: 'Failed to update platform' }, 500);
-  }
+  return c.json({ platform: Platform.toPublic(updated) });
 });
 
-// Delete platform
 platforms.delete('/:id', async (c) => {
-  try {
-    const userId = c.get('userId');
-    const platformId = c.req.param('id');
+  const { platform, response } = await loadOwned(c);
+  if (response) return response;
 
-    const platform = new Platform(c.env.DB);
-    const existingPlatform = await platform.findById(platformId);
+  await model(c).delete(platform.id);
 
-    if (!existingPlatform) {
-      return c.json({ error: 'Platform not found' }, 404);
-    }
+  await new Log(c.env.DB).info(
+    'Platform deleted',
+    { platformId: platform.id, name: platform.name },
+    c.get('userId')
+  );
 
-    if (existingPlatform.user_id !== userId) {
-      return c.json({ error: 'Unauthorized' }, 403);
-    }
-
-    await platform.delete(platformId);
-
-    const log = new Log(c.env.DB);
-    await log.info('Platform deleted', { 
-      platformId: platformId,
-      name: existingPlatform.name,
-      type: existingPlatform.type
-    }, userId);
-
-    return c.json({ message: 'Platform deleted successfully' });
-  } catch (error) {
-    console.error('Delete platform error:', error);
-    return c.json({ error: 'Failed to delete platform' }, 500);
-  }
+  return c.json({ message: 'Platform deleted successfully' });
 });
 
-// Connect platform
+// Manual connect: the credentials are verified against the real platform before they are saved
 platforms.post('/:id/connect', async (c) => {
+  const { platform, response } = await loadOwned(c);
+  if (response) return response;
+
+  let raw;
   try {
-    const userId = c.get('userId');
-    const platformId = c.req.param('id');
-    const credentials = await c.req.json();
-
-    const platform = new Platform(c.env.DB);
-    const existingPlatform = await platform.findById(platformId);
-
-    if (!existingPlatform) {
-      return c.json({ error: 'Platform not found' }, 404);
-    }
-
-    if (existingPlatform.user_id !== userId) {
-      return c.json({ error: 'Unauthorized' }, 403);
-    }
-
-    // Validate credentials based on platform type
-    const validationError = await validatePlatformCredentials(existingPlatform.type, credentials);
-    if (validationError) {
-      return c.json({ error: validationError }, 400);
-    }
-
-    const connectedPlatform = await platform.connect(platformId, credentials);
-
-    const log = new Log(c.env.DB);
-    await log.info('Platform connected', { 
-      platformId: platformId,
-      platformType: existingPlatform.type
-    }, userId, null, platformId);
-
-    return c.json({ platform: connectedPlatform });
-  } catch (error) {
-    console.error('Connect platform error:', error);
-    return c.json({ 
-      error: 'Failed to connect platform',
-      message: error.message 
-    }, 500);
+    raw = await c.req.json();
+  } catch {
+    return c.json({ error: 'Request body must be valid JSON' }, 400);
   }
+
+  const schema = credentialSchemaFor(platform.type);
+  if (!schema) return c.json({ error: 'Unknown platform type' }, 400);
+
+  const { data: credentials, response: invalid } = parseWith(c, schema, raw);
+  if (invalid) return invalid;
+
+  let info;
+  try {
+    info = await validateAgainstPlatform(c, platform, { ...platform.config, ...credentials });
+  } catch (error) {
+    return platformFailure(c, error);
+  }
+
+  const connected = await model(c).connect(platform.id, { ...credentials, authMethod: 'manual' }, info);
+
+  // Log which platform, never the credential values
+  await new Log(c.env.DB).info(
+    'Platform connected',
+    { platformId: platform.id, platformType: platform.type, method: 'manual' },
+    c.get('userId'),
+    null,
+    platform.id
+  );
+
+  return c.json({ platform: Platform.toPublic(connected) });
 });
 
-// Disconnect platform
+// Disconnect: also wipes the stored credentials
 platforms.post('/:id/disconnect', async (c) => {
-  try {
-    const userId = c.get('userId');
-    const platformId = c.req.param('id');
+  const { platform, response } = await loadOwned(c);
+  if (response) return response;
 
-    const platform = new Platform(c.env.DB);
-    const existingPlatform = await platform.findById(platformId);
+  const disconnected = await model(c).disconnect(platform.id);
 
-    if (!existingPlatform) {
-      return c.json({ error: 'Platform not found' }, 404);
-    }
+  await new Log(c.env.DB).info(
+    'Platform disconnected',
+    { platformId: platform.id, platformType: platform.type },
+    c.get('userId'),
+    null,
+    platform.id
+  );
 
-    if (existingPlatform.user_id !== userId) {
-      return c.json({ error: 'Unauthorized' }, 403);
-    }
-
-    const disconnectedPlatform = await platform.disconnect(platformId);
-
-    const log = new Log(c.env.DB);
-    await log.info('Platform disconnected', { 
-      platformId: platformId,
-      platformType: existingPlatform.type
-    }, userId, null, platformId);
-
-    return c.json({ platform: disconnectedPlatform });
-  } catch (error) {
-    console.error('Disconnect platform error:', error);
-    return c.json({ error: 'Failed to disconnect platform' }, 500);
-  }
+  return c.json({ platform: Platform.toPublic(disconnected) });
 });
 
-// Test platform connection
+// Test connection: a real call to the platform with the stored credentials
 platforms.post('/:id/test', async (c) => {
+  const { platform, response } = await loadOwned(c);
+  if (response) return response;
+
+  if (!platform.is_connected) {
+    return c.json({ error: 'Platform is not connected' }, 400);
+  }
+
+  let result;
   try {
-    const userId = c.get('userId');
-    const platformId = c.req.param('id');
+    const info = await validateAgainstPlatform(c, platform, platform.config);
+    result = { success: true, message: `Connected to ${info.accountName || 'your account'}` };
+  } catch (error) {
+    if (!(error instanceof PlatformError)) throw error;
+    result = { success: false, message: error.message, code: error.code };
+  }
 
-    const platform = new Platform(c.env.DB);
-    const existingPlatform = await platform.findById(platformId);
+  await new Log(c.env.DB).info(
+    'Platform connection tested',
+    { platformId: platform.id, success: result.success },
+    c.get('userId'),
+    null,
+    platform.id
+  );
 
-    if (!existingPlatform) {
-      return c.json({ error: 'Platform not found' }, 404);
-    }
+  return c.json(result);
+});
 
-    if (existingPlatform.user_id !== userId) {
-      return c.json({ error: 'Unauthorized' }, 403);
-    }
+// Start "Connect with <platform>": returns the provider's consent-screen URL
+platforms.post('/:id/oauth/start', async (c) => {
+  const { platform, response } = await loadOwned(c);
+  if (response) return response;
 
-    if (!existingPlatform.is_connected) {
-      return c.json({ error: 'Platform is not connected' }, 400);
-    }
+  if (!oauthConfigured(c.env, platform.type)) {
+    return c.json({ error: `One-click connect is not configured for ${platform.type}. Enter credentials manually.`, code: 'OAUTH_NOT_CONFIGURED' }, 501);
+  }
 
-    // Test connection (mock implementation)
-    const testResult = await testPlatformConnection(existingPlatform);
+  // Single-use, short-lived, bound to this user and platform (CSRF protection for the flow)
+  const state = randomHex(24);
+  await c.env.SESSIONS.put(
+    `oauth:${state}`,
+    JSON.stringify({ userId: c.get('userId'), platformId: platform.id, type: platform.type }),
+    { expirationTtl: OAUTH_STATE_TTL_SECONDS }
+  );
 
-    const log = new Log(c.env.DB);
-    await log.info('Platform connection tested', { 
-      platformId: platformId,
-      success: testResult.success
-    }, userId, null, platformId);
+  return c.json({ url: buildAuthUrl(c.env, platform.type, state) });
+});
 
-    return c.json({ 
-      success: testResult.success,
-      message: testResult.message
+// Ad accounts / pages the connected token can use
+platforms.get('/:id/accounts', async (c) => {
+  const { platform, response } = await loadOwned(c);
+  if (response) return response;
+  if (!platform.is_connected) return c.json({ error: 'Platform is not connected' }, 400);
+
+  try {
+    const adapter = adapterFactory.create(platform, c.env);
+    const options = await adapter.listAccounts();
+    return c.json({
+      ...options,
+      selected: {
+        accountId: platform.config.accountId || null,
+        pageId: platform.config.pageId || null,
+        instagramUserId: platform.config.instagramUserId || null,
+      },
     });
   } catch (error) {
-    console.error('Test platform connection error:', error);
-    return c.json({ error: 'Failed to test platform connection' }, 500);
+    return platformFailure(c, error);
   }
 });
 
-// Helper functions
-async function validatePlatformCredentials(type, credentials) {
-  switch (type) {
-    case 'facebook':
-      if (!credentials.accessToken || !credentials.accountId) {
-        return 'Access token and account ID are required for Facebook';
-      }
-      break;
-    case 'google':
-      if (!credentials.clientId || !credentials.clientSecret || !credentials.developerToken) {
-        return 'Client ID, client secret, and developer token are required for Google Ads';
-      }
-      break;
-    case 'tiktok':
-      if (!credentials.accessToken || !credentials.appId) {
-        return 'Access token and app ID are required for TikTok Ads';
-      }
-      break;
-    case 'instagram':
-      if (!credentials.accessToken || !credentials.businessAccountId) {
-        return 'Access token and business account ID are required for Instagram';
-      }
-      break;
-    default:
-      return 'Unknown platform type';
-  }
-  
-  return null;
-}
+// Switch the ad account / page used for publishing (must be one the token can access)
+platforms.post('/:id/select-account', validateJson(accountSelectSchema), async (c) => {
+  const { platform, response } = await loadOwned(c);
+  if (response) return response;
+  if (!platform.is_connected) return c.json({ error: 'Platform is not connected' }, 400);
 
-async function testPlatformConnection(platform) {
-  // Mock implementation - in real app, this would make actual API calls
+  const choice = c.get('body');
   try {
-    // Simulate API call
-    await new Promise(resolve => setTimeout(resolve, 1000));
-    
-    // Randomly succeed or fail for demo purposes
-    const success = Math.random() > 0.2; // 80% success rate
-    
-    return {
-      success,
-      message: success ? 'Connection successful' : 'Connection failed: Invalid credentials'
-    };
+    const adapter = adapterFactory.create(platform, c.env);
+    const options = await adapter.listAccounts();
+
+    const account = options.accounts.find((a) => a.id === choice.accountId);
+    if (!account) return c.json({ error: 'That account is not available for this connection' }, 400);
+
+    const patch = { accountId: account.id, accountName: account.name, currency: account.currency || platform.config.currency || null };
+
+    if (platform.type === 'facebook' || platform.type === 'instagram') {
+      const page = (options.pages || []).find((p) => p.id === choice.pageId);
+      if (!page) return c.json({ error: 'Choose one of your Facebook Pages' }, 400);
+      patch.pageId = page.id;
+      if (platform.type === 'instagram') {
+        if (!page.instagramUserId) return c.json({ error: 'That Page has no linked Instagram business account' }, 400);
+        patch.instagramUserId = page.instagramUserId;
+      }
+    }
+
+    const updated = await model(c).connect(platform.id, { ...patch }, { accountName: patch.accountName, currency: patch.currency });
+    return c.json({ platform: Platform.toPublic(updated) });
   } catch (error) {
-    return {
-      success: false,
-      message: `Connection failed: ${error.message}`
-    };
+    return platformFailure(c, error);
   }
-}
+});
 
 export { platforms as platformRoutes };
