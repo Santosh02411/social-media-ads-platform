@@ -1,35 +1,32 @@
-export const errorHandler = async (c, next) => {
-  try {
-    await next();
-  } catch (error) {
-    console.error('Error occurred:', error);
-    
-    // Handle different error types
-    if (error.name === 'ValidationError') {
-      return c.json({ 
-        error: 'Validation Error', 
-        details: error.message 
-      }, 400);
-    }
-    
-    if (error.name === 'UnauthorizedError') {
-      return c.json({ 
-        error: 'Unauthorized', 
-        details: error.message 
-      }, 401);
-    }
-    
-    if (error.name === 'NotFoundError') {
-      return c.json({ 
-        error: 'Not Found', 
-        details: error.message 
-      }, 404);
-    }
-    
-    // Default error response
-    return c.json({ 
-      error: 'Internal Server Error',
-      message: c.env.ENVIRONMENT === 'development' ? error.message : 'Something went wrong'
-    }, 500);
+import { getConfigProblems, isProduction } from '../utils/config.js';
+
+/**
+ * Registered with app.onError(). (Hono catches handler errors itself, so a
+ * try/catch middleware never sees them; onError is the supported hook.)
+ * Internal messages are only exposed outside production.
+ */
+export const errorHandler = (error, c) => {
+  console.error('Unhandled error:', error);
+
+  if (error?.status && error.status < 500 && typeof error.getResponse === 'function') {
+    return error.getResponse();
   }
+
+  return c.json(
+    {
+      error: 'Internal Server Error',
+      ...(isProduction(c.env) ? {} : { message: error?.message }),
+    },
+    500
+  );
+};
+
+/** Refuses to serve requests when required secrets are missing or malformed. */
+export const configGuard = async (c, next) => {
+  const problems = getConfigProblems(c.env);
+  if (problems.length > 0) {
+    console.error('Server misconfigured:', problems.join('; '));
+    return c.json({ error: 'Server is not configured correctly' }, 500);
+  }
+  return next();
 };
