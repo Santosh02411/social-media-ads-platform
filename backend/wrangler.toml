@@ -7,10 +7,10 @@ compatibility_flags = [ "nodejs_compat" ]
 [[d1_databases]]
 binding = "DB"
 database_name = "ads-saas-db"
-database_id = "00000000-0000-0000-0000-000000000000"
+database_id = "00000000-0000-0000-0000-000000000000" # replace with the id from `wrangler d1 create`
 migrations_dir = "../database/migrations"
 
-# KV Storage
+# KV Storage (SESSIONS holds login sessions + rate-limit counters)
 [[kv_namespaces]]
 binding = "SESSIONS"
 id = "00000000000000000000000000000001"
@@ -31,16 +31,38 @@ queue = "campaign-jobs"
 
 [[queues.consumers]]
 queue = "campaign-jobs"
+max_batch_size = 5
+max_batch_timeout = 2
+max_retries = 5
 
-# Durable Objects
-[[durable_objects.bindings]]
-name = "CAMPAIGN_ORCHESTRATOR"
-class_name = "CampaignOrchestrator"
+# Refresh ad performance numbers every 6 hours
+[triggers]
+crons = ["0 */6 * * *"]
 
-[[migrations]]
-tag = "v1"
-new_sqlite_classes = [ "CampaignOrchestrator" ]
-
+# ---------------------------------------------------------------------------
+# Non-secret settings only. NEVER put secrets here.
+#
+# Secrets (JWT_SECRET, ENCRYPTION_KEY):
+#   local dev  -> backend/.dev.vars   (run `npm run setup:secrets`)
+#   production -> `wrangler secret put JWT_SECRET` / `wrangler secret put ENCRYPTION_KEY`
+#
+# Optional secrets (features switch on when present):
+#   ANTHROPIC_API_KEY                                AI ad copy (Claude API)
+#   META_APP_ID / META_APP_SECRET                    one-click connect for Facebook + Instagram
+#   GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET / GOOGLE_ADS_DEVELOPER_TOKEN
+#   TIKTOK_APP_ID / TIKTOK_APP_SECRET
+#
+# For production deploy with the real values, e.g.:
+#   wrangler deploy --var ENVIRONMENT:production --var ALLOWED_ORIGINS:https://app.example.com
+# ---------------------------------------------------------------------------
 [vars]
-JWT_SECRET = "your-jwt-secret-key-change-this-in-production"
 ENVIRONMENT = "development"
+ALLOWED_ORIGINS = "http://localhost:3000,http://127.0.0.1:3000"
+FRONTEND_URL = "http://localhost:3000"
+# Public URL of THIS API: ad platforms download media from it and OAuth redirects back to it
+PUBLIC_API_URL = "http://localhost:8787"
+# Session cookie SameSite: "Lax" when the frontend and API share a registrable
+# domain (app.example.com + api.example.com); "None" if they are on different sites.
+COOKIE_SAMESITE = "Lax"
+# Model used for AI ad copy
+ANTHROPIC_MODEL = "claude-haiku-5-5"
