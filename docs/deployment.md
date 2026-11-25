@@ -18,7 +18,7 @@ The platform consists of:
 - **Storage**: Cloudflare R2 (media files)
 - **Cache**: Cloudflare KV (sessions + tokens)
 - **Queue**: Cloudflare Queues (async job processing)
-- **State**: Cloudflare Durable Objects (campaign orchestration)
+- **Jobs**: Cloudflare Queues + Cron Triggers
 
 ## Step 1: Backend Deployment
 
@@ -66,15 +66,13 @@ queue = "campaign-jobs"
 [[queues.consumers]]
 queue = "campaign-jobs"
 
-# Durable Objects
-[[durable_objects.bindings]]
-name = "CAMPAIGN_ORCHESTRATOR"
-class_name = "CampaignOrchestrator"
 
 [vars]
-JWT_SECRET = "your-jwt-secret-key"
 ENVIRONMENT = "production"
+ALLOWED_ORIGINS = "https://app.your-domain.com"
 ```
+
+Secrets (`JWT_SECRET`, `ENCRYPTION_KEY`) are **never** put in `wrangler.toml`; set them with `wrangler secret put` (see "Backend Variables" below).
 
 ### 1.3 Create Cloudflare Resources
 
@@ -204,12 +202,17 @@ app.use('*', cors({
 
 #### Backend Variables
 
-Update `wrangler.toml` with production values:
+Set the secrets with Wrangler, then keep only non-secret settings in `wrangler.toml`:
+
+```bash
+openssl rand -base64 48 | wrangler secret put JWT_SECRET
+openssl rand -base64 32 | wrangler secret put ENCRYPTION_KEY
+```
 
 ```toml
 [vars]
-JWT_SECRET = "your-secure-jwt-secret"
 ENVIRONMENT = "production"
+ALLOWED_ORIGINS = "https://app.your-domain.com"
 ```
 
 #### Frontend Variables
@@ -311,16 +314,15 @@ wrangler d1 import ads-saas-db --file=backup.sql
 #### Update Secrets Regularly
 
 ```bash
-# Generate new JWT secret
-openssl rand -base64 32
-
-# Update wrangler.toml and redeploy
-wrangler deploy
+# Rotating JWT_SECRET signs everyone out (sessions are re-created at next login)
+openssl rand -base64 48 | wrangler secret put JWT_SECRET
 ```
+
+`ENCRYPTION_KEY` protects stored platform credentials. **Do not rotate it casually**: credentials encrypted with the old key become unreadable and users must reconnect their platforms. Back it up in a password manager.
 
 #### Rate Limiting
 
-Consider implementing rate limiting in production:
+Login and registration already have KV-based throttling (5 failed logins per account per 15 minutes, 5 registrations per IP per hour). KV is eventually consistent, so for hard guarantees also add a Cloudflare WAF rate-limiting rule on `/api/auth/*`. For other routes you could add your own limiter, for example:
 
 ```javascript
 // Add to middleware
