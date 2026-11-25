@@ -4,7 +4,7 @@ import { useState } from 'react'
 import { useRouter } from 'next/navigation'
 import Link from 'next/link'
 import toast from 'react-hot-toast'
-import { authService, type LoginCredentials, type RegisterCredentials } from '@/lib/auth'
+import { authService, validatePassword, PASSWORD_MIN_LENGTH, PASSWORD_MAX_LENGTH } from '@/lib/auth'
 
 export default function LoginPage() {
   const [isLogin, setIsLogin] = useState(true)
@@ -31,6 +31,13 @@ export default function LoginPage() {
         router.push('/dashboard')
       } else {
         // Validation for registration
+        const passwordError = validatePassword(formData.password)
+        if (passwordError) {
+          toast.error(passwordError)
+          setLoading(false)
+          return
+        }
+
         if (formData.password !== formData.confirmPassword) {
           toast.error('Passwords do not match')
           setLoading(false)
@@ -43,7 +50,7 @@ export default function LoginPage() {
           password: formData.password,
         })
         
-        toast.success('Signed up successful! Please sign in.')
+        toast.success('Account created! Please sign in.')
         // Reset form and switch to login
         setFormData({
           name: '',
@@ -141,8 +148,14 @@ export default function LoginPage() {
                 placeholder="••••••••"
                 value={formData.password}
                 onChange={handleInputChange}
-                minLength={6}
+                minLength={isLogin ? 1 : PASSWORD_MIN_LENGTH}
+                maxLength={PASSWORD_MAX_LENGTH}
               />
+              {!isLogin && (
+                <p className="mt-1 text-xs text-gray-500">
+                  At least {PASSWORD_MIN_LENGTH} characters, with a letter and a number.
+                </p>
+              )}
             </div>
 
             {!isLogin && (
@@ -159,7 +172,8 @@ export default function LoginPage() {
                   placeholder="••••••••"
                   value={formData.confirmPassword}
                   onChange={handleInputChange}
-                  minLength={6}
+                  minLength={PASSWORD_MIN_LENGTH}
+                  maxLength={PASSWORD_MAX_LENGTH}
                 />
               </div>
             )}
