@@ -4,6 +4,7 @@ import { useState, useEffect } from 'react'
 import DashboardLayout from '@/components/DashboardLayout'
 import api from '@/lib/api'
 import toast from 'react-hot-toast'
+import { API_URL } from '@/lib/format'
 import type { Media } from '@/types'
 import {
   PhotoIcon,
@@ -50,13 +51,10 @@ export default function MediaPage() {
     setUploading(true)
 
     try {
-      // For demo purposes, we'll just call the API without actual file upload
-      // In production, you'd use FormData for file uploads
-      const response = await api.post('/api/media/upload', {
-        filename: selectedFile.name,
-        mime_type: selectedFile.type,
-        size: selectedFile.size
-      })
+      // Real multipart upload: the file goes to private storage (R2) through the API
+      const formData = new FormData()
+      formData.append('file', selectedFile)
+      const response = await api.post('/api/media', formData)
 
       const newMedia = response.data.media
       setMedia(prev => [newMedia, ...prev])
@@ -157,11 +155,14 @@ export default function MediaPage() {
               {media.map((item) => (
                 <div key={item.id} className="border rounded-lg overflow-hidden">
                   <div className="aspect-w-16 aspect-h-9 bg-gray-100">
-                    <img
-                      src={item.url}
-                      alt={item.original_name}
-                      className="w-full h-48 object-cover"
-                    />
+                    {item.mime_type.startsWith('video/') ? (
+                      <video src={`${API_URL}${item.url}`} className="w-full h-48 object-cover" controls preload="metadata" />
+                    ) : item.mime_type.startsWith('image/') ? (
+                      // eslint-disable-next-line @next/next/no-img-element
+                      <img src={`${API_URL}${item.url}`} alt={item.original_name} className="w-full h-48 object-cover" />
+                    ) : (
+                      <div className="w-full h-48 flex items-center justify-center text-sm text-gray-500">{item.mime_type}</div>
+                    )}
                   </div>
                   
                   <div className="p-4">
