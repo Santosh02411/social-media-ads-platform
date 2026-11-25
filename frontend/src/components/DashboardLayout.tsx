@@ -29,11 +29,17 @@ export default function DashboardLayout({ children }: DashboardLayoutProps) {
   const pathname = usePathname()
 
   useEffect(() => {
-    const storedUser = authService.getStoredUser()
-    if (storedUser) {
-      setUser(storedUser)
-    } else {
-      router.push('/login')
+    let cancelled = false
+    authService.getCurrentUser().then((currentUser) => {
+      if (cancelled) return
+      if (currentUser) {
+        setUser(currentUser)
+      } else {
+        router.push('/login')
+      }
+    })
+    return () => {
+      cancelled = true
     }
   }, [router])
 
