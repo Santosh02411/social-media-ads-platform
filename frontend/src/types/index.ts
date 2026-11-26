@@ -6,81 +6,126 @@ export interface User {
   updated_at?: string
 }
 
-// Platform types
+// Platform types (the API never returns credentials, only this safe summary)
+export interface PlatformConfigSummary {
+  connectedAt: string | null
+  disconnectedAt: string | null
+  accountHint: string | null
+  accountName: string | null
+  currency: string | null
+  tokenExpiresAt: string | null
+  authMethod: 'oauth' | 'manual' | null
+}
+
+export type PlatformType = 'facebook' | 'google' | 'tiktok' | 'instagram'
+
 export interface Platform {
   id: string
   name: string
-  type: 'facebook' | 'google' | 'tiktok' | 'instagram'
-  config: Record<string, any>
+  type: PlatformType
+  config: PlatformConfigSummary
   user_id: string
   is_connected: boolean
   created_at: string
   updated_at: string
 }
 
-export interface PlatformCredentials {
-  facebook?: {
-    accessToken: string
-    accountId: string
-  }
-  google?: {
-    clientId: string
-    clientSecret: string
-    refreshToken: string
-    developerToken: string
-  }
-  tiktok?: {
-    accessToken: string
-    appId: string
-  }
-  instagram?: {
-    accessToken: string
-    businessAccountId: string
-  }
+export interface PlatformProviders {
+  providers: Record<PlatformType, { oauth: boolean }>
+  sandbox: boolean
 }
 
+export interface AccountOption { id: string; name: string; currency?: string }
+export interface PageOption { id: string; name: string; instagramUserId: string | null; instagramUsername: string | null }
+
 // Campaign types
+export type CampaignState = 'draft' | 'publishing' | 'active' | 'paused' | 'completed'
+export type Objective = 'TRAFFIC' | 'AWARENESS'
+export type CallToAction = 'LEARN_MORE' | 'SHOP_NOW' | 'SIGN_UP' | 'CONTACT_US' | 'DOWNLOAD' | 'GET_QUOTE'
+
+export interface Targeting {
+  countries: string[]
+  ageMin: number
+  ageMax: number
+  keywords: string[]
+}
+
 export interface Campaign {
   id: string
   title: string
-  description?: string
+  description?: string | null
   budget: number
-  status: 'draft' | 'active' | 'paused' | 'completed'
-  schedule_start?: string
-  schedule_end?: string
+  budget_type: 'daily' | 'lifetime'
+  objective: Objective
+  status: CampaignState
+  schedule_start?: string | null
+  schedule_end?: string | null
+  destination_url?: string | null
+  headline?: string | null
+  ad_copy?: string | null
+  call_to_action: CallToAction
+  targeting: Targeting
+  variants: { headlines: string[]; descriptions: string[] }
+  publish_paused: boolean
   user_id: string
   created_at: string
   updated_at: string
   platforms?: CampaignPlatform[]
+  platform_count?: number
+  success_count?: number
+  failed_count?: number
 }
 
 export interface CampaignPlatform {
   id: string
-  platform_id: string
+  platformId: string
   platformName: string
-  platformType: string
-  status: 'pending' | 'success' | 'failed' | 'retrying'
-  errorMessage?: string
+  platformType: PlatformType
+  status: 'pending' | 'processing' | 'success' | 'failed' | 'retrying'
+  errorMessage?: string | null
   retryCount: number
+  externalId?: string | null
+  publishedAt?: string | null
 }
 
 export interface CreateCampaignData {
   title: string
-  description?: string
   budget: number
-  platforms: string[]
+  budgetType: 'daily' | 'lifetime'
+  objective: Objective
   scheduleStart?: string
   scheduleEnd?: string
-  objective?: string
+  destinationUrl?: string
+  headline?: string
+  adCopy?: string
+  callToAction: CallToAction
+  targeting: Targeting
+  variants?: { headlines: string[]; descriptions: string[] }
+  publishPaused: boolean
+  platforms: string[]
+  mediaIds: string[]
 }
 
-export interface UpdateCampaignData {
-  title?: string
-  description?: string
-  budget?: number
-  status?: string
-  scheduleStart?: string
-  scheduleEnd?: string
+// AI + analytics
+export interface AdCopyResult {
+  headlines: string[]
+  descriptions: string[]
+  primaryTexts: string[]
+  callToAction: CallToAction
+}
+
+export interface AnalyticsTotals { impressions: number; clicks: number; spend: number; conversions: number; ctr: number; cpc: number }
+export interface AnalyticsSummary {
+  days: number
+  totals: AnalyticsTotals
+  changes: { impressions: number | null; clicks: number | null; spend: number | null; ctr: number | null }
+  series: { date: string; impressions: number; clicks: number; spend: number }[]
+  byPlatform: { platform: PlatformType; impressions: number; clicks: number; spend: number }[]
+  topCampaigns: { id: string; title: string; impressions: number; clicks: number; spend: number }[]
+  currency: string | null
+  mixedCurrencies: boolean
+  hasData: boolean
+  lastSyncedAt: string | null
 }
 
 // Media types
@@ -278,7 +323,7 @@ export interface TableProps extends BaseComponentProps {
 export interface NavItem {
   name: string
   href: string
-  icon?: React.ComponentType<any>
+  icon: React.ComponentType<any>
   current?: boolean
 }
 
