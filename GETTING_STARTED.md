@@ -107,23 +107,29 @@ queue = "campaign-jobs"
 [[queues.consumers]]
 queue = "campaign-jobs"
 
-# Durable Objects
-[[durable_objects.bindings]]
-name = "CAMPAIGN_ORCHESTRATOR"
-class_name = "CampaignOrchestrator"
 
 [vars]
-JWT_SECRET = "your-secure-jwt-secret-key"
 ENVIRONMENT = "development"
+ALLOWED_ORIGINS = "http://localhost:3000,http://127.0.0.1:3000"
+COOKIE_SAMESITE = "Lax"
+```
+
+Secrets are **not** stored in `wrangler.toml`. Generate them into the git-ignored `backend/.dev.vars`:
+
+```bash
+cd backend
+npm run setup:secrets   # creates .dev.vars with a random JWT_SECRET and ENCRYPTION_KEY
 ```
 
 #### Frontend Configuration
 
-Create `frontend/.env.local`:
+Create `frontend/.env.local` (copy `frontend/.env.example`):
 
 ```env
 NEXT_PUBLIC_API_URL=http://localhost:8787
 ```
+
+> Open the app at `http://localhost:3000` (not a LAN IP or `127.0.0.1`) so the session cookie and the API's CORS/CSRF origin check line up. To use another origin, add it to `ALLOWED_ORIGINS`.
 
 ### 4. Run Database Migrations
 
@@ -293,12 +299,18 @@ vercel --prod
 ### 3. Update Production Configuration
 
 #### Backend
-Update `wrangler.toml` with production values:
-```toml
-[vars]
-JWT_SECRET = "your-production-jwt-secret"
-ENVIRONMENT = "production"
+Set the secrets with Wrangler (they never go in `wrangler.toml`):
+```bash
+openssl rand -base64 48 | wrangler secret put JWT_SECRET
+openssl rand -base64 32 | wrangler secret put ENCRYPTION_KEY
 ```
+Then deploy with the production settings:
+```bash
+wrangler deploy \
+  --var ENVIRONMENT:production \
+  --var ALLOWED_ORIGINS:https://app.your-domain.com
+```
+Host the frontend and API on the same registrable domain (e.g. `app.example.com` + `api.example.com`) so the `Lax` session cookie works. If they are on different sites, also pass `--var COOKIE_SAMESITE:None`.
 
 #### Frontend
 Set environment variables in your hosting platform:

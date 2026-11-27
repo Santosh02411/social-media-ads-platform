@@ -1,4 +1,3 @@
-<<<<<<< HEAD
 # Unified Social Media Ads SaaS Platform
 
 A production-ready MVP for managing social media advertising campaigns across multiple platforms.
@@ -11,17 +10,26 @@ A production-ready MVP for managing social media advertising campaigns across mu
 - **Storage**: Cloudflare R2 (media files)
 - **Cache**: Cloudflare KV (sessions + tokens)
 - **Queues**: Cloudflare Queues (async job processing)
-- **State Management**: Cloudflare Durable Objects (campaign orchestration)
+- **Jobs**: Cloudflare Queues (publishing, retries) + Cron Triggers (metrics sync)
+
+## Security at a glance
+
+- Sessions: signed JWT in an **httpOnly** cookie + server-side session in KV (logout revokes immediately)
+- CSRF: state-changing requests must come from an allowed `Origin`
+- Platform API credentials: **AES-256-GCM encrypted** in D1, never returned to the browser
+- Passwords: bcrypt (cost 12), 8-72 chars with a letter and a number, per-account lockout and per-IP rate limits
+- All request bodies validated with Zod; CORS restricted via `ALLOWED_ORIGINS`
 
 ## Features
 
-- Multi-platform ad management (Facebook, Google, TikTok, Instagram)
-- Campaign creation and scheduling
-- Media upload and management
-- Real-time status tracking
-- AI-powered ad copy generation
-- Retry mechanisms for failed jobs
-- Campaign duplication
+- **Publish to Facebook, Instagram, Google Ads and TikTok** through their real APIs (Meta Marketing API v25, Google Ads API v25, TikTok Business API v1.3). Ads are created **paused** by default; activate and pause from the app
+- **Connect accounts** with one-click OAuth (Meta, Google, TikTok) or manual credentials that are verified against the platform before saving
+- **Queue-based publishing** with retries and exponential backoff. A retry resumes where it stopped, so it never creates duplicate campaigns on the platform
+- **AI ad copy** with the Claude API: headlines, descriptions and ad text that respect each platform's length limits
+- **Real performance dashboard**: impressions, clicks, spend, CTR and period-over-period change, synced from the platforms every 6 hours (or on demand). With no data it says so; nothing is invented
+- Media upload (private R2 storage, signed download links for the ad platforms), campaign duplication, job status and manual retry
+
+> Everything is tested end to end against a local mock of the platforms. It has **not** been run against live Meta/Google/TikTok accounts. See [docs/INTEGRATIONS.md](docs/INTEGRATIONS.md) for exactly what that means and the go-live checklist.
 
 ## Project Structure
 
@@ -29,12 +37,11 @@ A production-ready MVP for managing social media advertising campaigns across mu
 ads-saas-platform/
 ├── backend/                 # Cloudflare Workers + Hono
 │   └── src/
-│       ├── adapters/        # Platform integration modules
-│       ├── durable-objects/ # Campaign orchestration
+│       ├── adapters/        # Facebook, Instagram, Google, TikTok API clients
 │       ├── middleware/      # Auth and validation
 │       ├── models/          # Data models
 │       ├── routes/          # API endpoints
-│       ├── services/        # Business logic
+│       ├── services/        # OAuth, AI copy, metrics sync
 │       ├── utils/           # Helper functions
 │       └── workers/         # Queue processors
 ├── frontend/                # Next.js application
@@ -87,11 +94,19 @@ Update `backend/wrangler.toml` with your Cloudflare resource IDs. You'll need to
 - KV namespaces: `wrangler kv:namespace create "SESSIONS"` and `wrangler kv:namespace create "TOKENS"`
 - An R2 bucket: `wrangler r2 bucket create ads-saas-media`
 
+Generate the local secrets (writes the git-ignored `backend/.dev.vars`):
+```bash
+cd backend
+npm run setup:secrets
+```
+Secrets (`JWT_SECRET`, `ENCRYPTION_KEY`) never go in `wrangler.toml`. In production use `wrangler secret put`. See [docs/SECURITY.md](docs/SECURITY.md).
+
 #### 2. Frontend
-Create a `.env.local` file in the `frontend` directory:
+Copy `frontend/.env.example` to `frontend/.env.local`:
 ```env
 NEXT_PUBLIC_API_URL=http://localhost:8787
 ```
+Open the app at `http://localhost:3000` (the API only accepts the origins listed in `ALLOWED_ORIGINS`).
 
 ## Running Locally
 
@@ -103,6 +118,14 @@ To run the full stack locally:
    wrangler dev
    ```
    The API will be available at `http://localhost:8787`.
+
+   No ad accounts yet? Use the sandbox (a local mock of the platforms and the Claude API):
+   ```bash
+   cd backend
+   npm run setup:secrets -- --sandbox   # once
+   npm run mock:platforms               # in a separate terminal
+   ```
+   The Integrations page shows a "Sandbox mode" banner while it is active.
 
 2. **Start the Frontend**:
    ```bash
@@ -116,6 +139,17 @@ To run the full stack locally:
 You can perform a quick health check on the backend:
 ```bash
 curl http://localhost:8787/health
+```
+
+Two test suites run against the local backend plus the mock platform server. Use a fresh local database for each run, since they exercise the rate limiters:
+```bash
+cd backend
+npm run setup:secrets -- --sandbox
+rm -rf .wrangler && npm run db:local   # fresh local D1 + KV
+npm run mock:platforms                 # terminal 1
+npm run dev                            # terminal 2
+npm run test:security                  # terminal 3: 63 checks (auth, CSRF, encryption, rate limits)
+npm run test:e2e                       # terminal 3 (fresh DB again): 86 checks (OAuth, AI, publishing, retries, metrics)
 ```
 
 ## Deployment
@@ -134,240 +168,3 @@ The platform is designed for Cloudflare's edge computing platform.
 ## License
 
 MIT License
-=======
-# ⚡ AdSync — Unified Social Media Ads Platform
-
-An AI-powered multi-platform social media advertising dashboard built with Python & Flask that allows users to create, publish, schedule, and monitor advertisements across multiple social media platforms from a single unified interface.
-
----
-
-# 🚀 Features
-
-### 🔐 Authentication & User Management
-
-- User Registration & Login
-- Secure Authentication System
-- Admin & User Roles
-- User Profile Management
-
-### 📱 Multi-Platform Integration
-
-- Facebook Ads Integration
-- Instagram Posting Support
-- Twitter/X API Integration
-- LinkedIn Ad Publishing
-- TikTok Content Posting
-- Pinterest Ad Publishing
-
-### 📤 Ad Publishing System
-
-- Text-based Ads
-- Image Ads
-- Video Ads
-- Audio Promotions
-- Multi-platform Publishing
-- Real-time Posting Status
-
-### 🕒 Smart Scheduling System
-
-- Future Ad Scheduling
-- Automatic Background Posting
-- Scheduled Campaign Management
-- Real-time Scheduler Monitoring
-
-### 📊 Analytics & Monitoring
-
-- Ad Publishing History
-- Platform-wise Status Tracking
-- Campaign Statistics
-- Performance Monitoring Dashboard
-
-### 📂 Media Management
-
-- Media Upload System
-- Image & Video Handling
-- Audio File Support
-- Secure File Storage
-
-### 🎨 UI/UX Features
-
-- Responsive Dashboard Interface
-- Dark Industrial Theme
-- Interactive Notifications
-- Real-time Event Updates
-
----
-
-# 🛠️ Tech Stack
-
-| Layer | Technologies Used |
-|-------|------------------|
-| Backend | Python, Flask |
-| Frontend | HTML5, CSS3, JavaScript |
-| Database | SQLite / MySQL |
-| APIs & Services | Facebook Graph API, Twitter API v2, LinkedIn API, TikTok API, Pinterest API |
-| Authentication | OAuth 2.0 |
-| Real-time Events | Flask Polling / Scheduler |
-
----
-
-# 📂 Project Structure
-
-```bash
-social-ads-platform/
-│
-├── app.py                      # Flask backend
-├── requirements.txt            # Python dependencies
-├── .env.example                # Environment variables template
-├── README.md                   # Project documentation
-├── information.md              # Detailed setup guide
-├── run.sh                      # Startup script
-│
-├── api/
-│   ├── __init__.py
-│   ├── facebook_connector.py
-│   ├── instagram_connector.py
-│   ├── twitter_connector.py
-│   ├── linkedin_connector.py
-│   ├── tiktok_connector.py
-│   ├── pinterest_connector.py
-│   └── scheduler.py
-│
-├── templates/
-│   └── index.html
-│
-└── static/
-    ├── css/
-    │   └── style.css
-    │
-    ├── js/
-    │   └── app.js
-    │
-    └── uploads/
-```
-
----
-
-# ⚡ Quick Start
-
-## 1️⃣ Clone the Repository
-
-```bash
-git clone https://github.com/your-username/social-ads-platform.git
-cd social-ads-platform
-```
-
-## 2️⃣ Install Dependencies
-
-```bash
-pip install -r requirements.txt
-```
-
-## 3️⃣ Configure Environment Variables
-
-```bash
-cp .env.example .env
-```
-
-Edit `.env` and add:
-
-- SECRET_KEY
-- API Keys
-- OAuth Tokens
-- Platform Credentials
-
----
-
-## 4️⃣ Run the Application
-
-```bash
-python app.py
-```
-
-or
-
-```bash
-bash run.sh
-```
-
----
-
-# 🌐 Application URL
-
-Open in browser:
-
-```bash
-http://127.0.0.1:5000
-```
-
----
-
-# 🔌 Platform Connection Workflow
-
-1. Open Dashboard
-2. Select Platform
-3. Enter API Credentials
-4. Click Connect
-5. Start Publishing Ads
-
----
-
-# 📤 Ad Publishing Workflow
-
-1. Create Ad Campaign
-2. Add Ad Content
-3. Upload Media Files
-4. Select Target Platforms
-5. Publish Instantly or Schedule
-6. Monitor Real-time Status
-
----
-
-# 📡 REST API Endpoints
-
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| GET | `/api/platforms` | Get connected platforms |
-| POST | `/api/connect` | Connect platform |
-| POST | `/api/disconnect` | Disconnect platform |
-| POST | `/api/test-connection` | Validate credentials |
-| POST | `/api/upload` | Upload media |
-| POST | `/api/post` | Publish ads |
-| GET | `/api/history` | Fetch post history |
-| GET | `/api/stats` | Analytics & statistics |
-| POST | `/api/schedule` | Schedule post |
-| GET | `/api/schedule` | List scheduled posts |
-| DELETE | `/api/schedule/<id>` | Cancel scheduled post |
-| GET | `/api/events?since=` | Real-time events |
-
----
-
-# 📈 System Workflow
-
-1. User Authentication
-2. Platform Connection
-3. Ad Creation
-4. Media Upload
-5. API-based Publishing
-6. Real-time Status Tracking
-7. Analytics & Reporting
-
----
-
-# 🔮 Future Enhancements
-
-- AI-based Ad Content Generation
-- Campaign Performance Prediction
-- Advanced Audience Targeting
-- Social Media Insights Dashboard
-- Mobile Application Support
-- Multi-user Team Collaboration
-
----
-
-# 👨‍💻 Developed For
-
-Unified Multi-Platform Social Media Advertisement Publishing & Campaign Management using Python, Flask, APIs, and Automation.
-
----
->>>>>>> 5ecb79a7bec97685f6679cfec3d86f487b41cdc7

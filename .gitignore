@@ -1,8 +1,19 @@
+# dependencies & build output
 node_modules/
+.next/
+out/
+dist/
+
+# Cloudflare local state (contains your dev database and KV data)
+.wrangler/
+
+# secrets - never commit these
+.dev.vars
 .env
 .env.*
 !.env.example
-dist/
-build/
-.next/
-coverage/
+!.dev.vars.example
+
+# misc
+*.log
+.DS_Store
