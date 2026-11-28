@@ -35,7 +35,7 @@ if (!existsSync(target)) {
   writeFileSync(
     target,
     `JWT_SECRET=${randomBytes(48).toString('base64url')}\nENCRYPTION_KEY=${randomBytes(32).toString('base64')}\n${sandbox ? SANDBOX_BLOCK : ''}`,
-    { mode: 0o600 }
+    { mode: 0o600 },
   );
   console.log('Created backend/.dev.vars with new random JWT_SECRET and ENCRYPTION_KEY.');
   if (sandbox) console.log('Sandbox mode enabled: start the mock with `npm run mock:platforms`.');
