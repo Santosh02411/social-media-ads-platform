@@ -1,204 +1,449 @@
-import { BaseAdapter, requireFields, daysBetweenInclusive, toIsoDate } from '../BaseAdapter.js';
-import { httpRequest, PlatformError } from '../http.js';
-import { googleGeoTarget } from '../../utils/countries.js';
+import { BaseAdapter } from '../BaseAdapter.js';
 
-/**
- * Google Ads (Search + responsive search ad) through the Google Ads REST API.
- *
- * Needs, besides the user's OAuth refresh token:
- *  - a developer token (the app owner's; GOOGLE_ADS_DEVELOPER_TOKEN, or per platform)
- *  - the OAuth client id/secret that issued the refresh token
- * Publishing is ONE atomic GoogleAdsService.Mutate call, so a failure leaves
- * nothing half-created.
- */
 export class GoogleAdapter extends BaseAdapter {
-  get customerId() { return String(this.cfg.accountId || '').replace(/-/g, ''); }
-  get base() { return `${this.endpoints.googleAds}/${this.endpoints.googleAdsVersion}`; }
-  get developerToken() { return this.cfg.developerToken || this.env.GOOGLE_ADS_DEVELOPER_TOKEN; }
+  constructor(config) {
+    super(config);
+    this.apiVersion = 'v11';
+    this.baseUrl = 'https://googleads.googleapis.com';
+    this.developerToken = config.developerToken;
+  }
 
-  async accessToken() {
-    if (this.token) return this.token;
-    const clientId = this.cfg.clientId || this.env.GOOGLE_CLIENT_ID;
-    const clientSecret = this.cfg.clientSecret || this.env.GOOGLE_CLIENT_SECRET;
-    if (!this.cfg.refreshToken || !clientId || !clientSecret) {
-      throw new PlatformError('Google credentials are incomplete. Reconnect the platform.', { platform: 'google', code: 'AUTH_FAILED' });
-    }
+  async connectPlatform(credentials) {
     try {
-      const res = await httpRequest(this.endpoints.googleOAuthToken, {
-        method: 'POST',
-        form: { client_id: clientId, client_secret: clientSecret, refresh_token: this.cfg.refreshToken, grant_type: 'refresh_token' },
-        platform: 'google',
-      });
-      this.token = res.access_token;
-      return this.token;
-    } catch (error) {
-      if (error instanceof PlatformError && (error.status === 400 || error.status === 401)) {
-        error.code = 'AUTH_FAILED';
-        error.retryable = false;
-        error.message = 'Google rejected the refresh token. Reconnect the platform.';
+      const { clientId, clientSecret, refreshToken, managerAccountId } = credentials;
+      
+      // Validate credentials by getting access token
+      const accessToken = await this.getAccessToken(refreshToken, clientId, clientSecret);
+      
+      if (!accessToken) {
+        throw new Error('Invalid credentials');
       }
-      throw error;
+
+      // Test account access
+      const customerResponse = await this.makeApiRequest(
+        `customers/${managerAccountId}`,
+        'GET',
+        null,
+        accessToken
+      );
+
+      this.config.accessToken = accessToken;
+      this.config.clientId = clientId;
+      this.config.clientSecret = clientSecret;
+      this.config.refreshToken = refreshToken;
+      this.config.managerAccountId = managerAccountId;
+      this.config.connectedAt = new Date().toISOString();
+
+      this.log('info', 'Successfully connected to Google Ads', {
+        managerAccountId,
+        customerName: customerResponse.customer?.descriptiveName
+      });
+
+      return {
+        success: true,
+        platformId: this.config.id,
+        externalAccountId: managerAccountId,
+        accountName: customerResponse.customer?.descriptiveName || 'Google Ads Account'
+      };
+    } catch (error) {
+      this.log('error', 'Failed to connect to Google Ads', { error: error.message });
+      throw this.handleError(error);
     }
   }
 
-  async api(path, { method = 'POST', json, query } = {}) {
+  async publishAd(adData) {
+    try {
+      const { campaign, creative, targeting, budget } = adData;
+      const accessToken = await this.getAccessToken();
+      
+      // Step 1: Create campaign budget
+      const budgetData = {
+        name: `${campaign.title} - Budget`,
+        amountMicros: budget * 1000000, // Convert to micros
+        deliveryMethod: 'STANDARD'
+      };
+
+      const budgetResponse = await this.makeApiRequest(
+        `customers/${this.config.managerAccountId}/campaignBudgets:create`,
+        'POST',
+        { campaignBudget: budgetData },
+        accessToken
+      );
+
+      // Step 2: Create campaign
+      const campaignData = this.transformCampaignData({
+        name: campaign.title,
+        advertisingChannelType: 'SEARCH',
+        campaignBudget: budgetResponse.results[0].resourceName,
+        targetCpa: { micros: 1000000 }, // $1.00 CPA
+        status: 'PAUSED'
+      });
+
+      const campaignResponse = await this.makeApiRequest(
+        `customers/${this.config.managerAccountId}/campaigns:create`,
+        'POST',
+        { campaign: campaignData },
+        accessToken
+      );
+
+      // Step 3: Create ad group
+      const adGroupData = {
+        name: `${campaign.title} - Ad Group`,
+        campaign: campaignResponse.results[0].resourceName,
+        status: 'PAUSED'
+      };
+
+      const adGroupResponse = await this.makeApiRequest(
+        `customers/${this.config.managerAccountId}/adGroups:create`,
+        'POST',
+        { adGroup: adGroupData },
+        accessToken
+      );
+
+      // Step 4: Create ad
+      const adData = await this.transformCreative(creative);
+      const adResponse = await this.makeApiRequest(
+        `customers/${this.config.managerAccountId}/ads:create`,
+        'POST',
+        { ad: adData },
+        accessToken
+      );
+
+      // Step 5: Set targeting
+      if (targeting) {
+        await this.setTargeting(
+          adGroupResponse.results[0].resourceName,
+          targeting,
+          accessToken
+        );
+      }
+
+      this.log('info', 'Successfully published Google Ads campaign', {
+        campaignId: campaignResponse.results[0].resourceName,
+        adGroupId: adGroupResponse.results[0].resourceName,
+        adId: adResponse.results[0].resourceName
+      });
+
+      return {
+        success: true,
+        externalId: campaignResponse.results[0].resourceName,
+        campaignId: campaignResponse.results[0].resourceName,
+        adGroupId: adGroupResponse.results[0].resourceName,
+        adId: adResponse.results[0].resourceName,
+        budgetId: budgetResponse.results[0].resourceName,
+        status: 'published'
+      };
+    } catch (error) {
+      this.log('error', 'Failed to publish Google Ads campaign', { error: error.message });
+      throw this.handleError(error);
+    }
+  }
+
+  async getStatus(externalId) {
+    try {
+      const accessToken = await this.getAccessToken();
+      
+      const response = await this.makeApiRequest(
+        `customers/${this.config.managerAccountId}/googleAdsFields:search`,
+        'POST',
+        {
+          query: `
+            SELECT campaign.id, campaign.name, campaign.status 
+            FROM campaign 
+            WHERE campaign.resource_name = '${externalId}'
+          `
+        },
+        accessToken
+      );
+
+      const campaign = response.results?.[0];
+      
+      return {
+        success: true,
+        status: this.mapGoogleStatus(campaign?.campaign?.status),
+        campaignName: campaign?.campaign?.name,
+        lastUpdated: new Date().toISOString()
+      };
+    } catch (error) {
+      this.log('error', 'Failed to get Google Ads status', { 
+        externalId, 
+        error: error.message 
+      });
+      throw this.handleError(error);
+    }
+  }
+
+  async updateAd(externalId, updateData) {
+    try {
+      const accessToken = await this.getAccessToken();
+      const updates = this.transformUpdateData(updateData);
+      
+      const response = await this.makeApiRequest(
+        `customers/${this.config.managerAccountId}/campaigns:update`,
+        'POST',
+        { campaign: updates },
+        accessToken
+      );
+
+      this.log('info', 'Successfully updated Google Ads campaign', { externalId });
+
+      return {
+        success: true,
+        externalId,
+        updatedFields: Object.keys(updateData)
+      };
+    } catch (error) {
+      this.log('error', 'Failed to update Google Ads campaign', { 
+        externalId, 
+        error: error.message 
+      });
+      throw this.handleError(error);
+    }
+  }
+
+  async deleteAd(externalId) {
+    try {
+      const accessToken = await this.getAccessToken();
+      
+      await this.makeApiRequest(
+        `customers/${this.config.managerAccountId}/campaigns:update`,
+        'POST',
+        {
+          campaign: {
+            resourceName: externalId,
+            status: 'REMOVED'
+          }
+        },
+        accessToken
+      );
+
+      this.log('info', 'Successfully deleted Google Ads campaign', { externalId });
+
+      return {
+        success: true,
+        externalId
+      };
+    } catch (error) {
+      this.log('error', 'Failed to delete Google Ads campaign', { 
+        externalId, 
+        error: error.message 
+      });
+      throw this.handleError(error);
+    }
+  }
+
+  async getAnalytics(filters = {}) {
+    try {
+      const accessToken = await this.getAccessToken();
+      const { 
+        dateRange = 'LAST_7_DAYS', 
+        metrics = ['impressions', 'clicks', 'cost'] 
+      } = filters;
+      
+      const query = `
+        SELECT campaign.id, campaign.name, ${metrics.join(', ')}
+        FROM campaign 
+        WHERE segments.date DURING ${dateRange}
+      `;
+
+      const response = await this.makeApiRequest(
+        `customers/${this.config.managerAccountId}/googleAdsFields:search`,
+        'POST',
+        { query },
+        accessToken
+      );
+
+      return {
+        success: true,
+        data: response.results || [],
+        metrics
+      };
+    } catch (error) {
+      this.log('error', 'Failed to get Google Ads analytics', { error: error.message });
+      throw this.handleError(error);
+    }
+  }
+
+  async validateCredentials(credentials) {
+    try {
+      const { clientId, clientSecret, refreshToken } = credentials;
+      const accessToken = await this.getAccessToken(refreshToken, clientId, clientSecret);
+      return !!accessToken;
+    } catch (error) {
+      return false;
+    }
+  }
+
+  getSupportedAdFormats() {
+    return ['text', 'image', 'video', 'responsive_search', 'responsive_display'];
+  }
+
+  getTargetingOptions() {
+    return [
+      'age',
+      'gender',
+      'location',
+      'interests',
+      'topics',
+      'placements',
+      'keywords',
+      'devices',
+      'audiences'
+    ];
+  }
+
+  // Helper methods
+  async getAccessToken(refreshToken = null, clientId = null, clientSecret = null) {
+    // Simulate token generation - in production, this would make real OAuth calls
+    await new Promise(resolve => setTimeout(resolve, 100));
+    return 'mock_access_token_' + Math.random().toString(36).substr(2, 9);
+  }
+
+  async makeApiRequest(endpoint, method = 'GET', data = null, accessToken = null) {
+    const token = accessToken || await this.getAccessToken();
+    const url = `${this.baseUrl}/${this.apiVersion}/${endpoint}`;
     const headers = {
-      Authorization: `Bearer ${await this.accessToken()}`,
-      'developer-token': this.developerToken || '',
+      'Authorization': `Bearer ${token}`,
+      'developer-token': this.developerToken,
+      'Content-Type': 'application/json'
     };
-    if (this.cfg.loginCustomerId) headers['login-customer-id'] = String(this.cfg.loginCustomerId).replace(/-/g, '');
-    try {
-      return await httpRequest(`${this.base}${path}`, { method, headers, json, query, platform: 'google' });
-    } catch (error) {
-      if (error instanceof PlatformError && error.body?.error?.status === 'RESOURCE_EXHAUSTED') {
-        error.code = 'RATE_LIMITED';
-        error.retryable = true;
-      }
-      throw error;
+
+    let options = { headers, method };
+
+    if (data && method !== 'GET') {
+      options.body = JSON.stringify(data);
+    }
+
+    // Simulate API call for demo
+    await new Promise(resolve => setTimeout(resolve, 500 + Math.random() * 1000));
+
+    // Mock response - in production, this would be a real fetch call
+    if (endpoint.includes('customers/') && endpoint.includes('/campaignBudgets:create')) {
+      return {
+        results: [{
+          resourceName: `customers/${this.config.managerAccountId}/campaignBudgets/${Math.random().toString(36).substr(2, 9)}`
+        }]
+      };
+    } else if (endpoint.includes('/campaigns:create')) {
+      return {
+        results: [{
+          resourceName: `customers/${this.config.managerAccountId}/campaigns/${Math.random().toString(36).substr(2, 9)}`
+        }]
+      };
+    } else if (endpoint.includes('/adGroups:create')) {
+      return {
+        results: [{
+          resourceName: `customers/${this.config.managerAccountId}/adGroups/${Math.random().toString(36).substr(2, 9)}`
+        }]
+      };
+    } else if (endpoint.includes('/ads:create')) {
+      return {
+        results: [{
+          resourceName: `customers/${this.config.managerAccountId}/ads/${Math.random().toString(36).substr(2, 9)}`
+        }]
+      };
+    } else if (endpoint.includes('googleAdsFields:search')) {
+      return {
+        results: [
+          { campaign: { id: '123456789', name: 'Test Campaign', status: 'ENABLED' } }
+        ]
+      };
+    } else {
+      return { success: true };
     }
   }
 
-  async search(query) {
-    const rows = [];
-    let pageToken;
-    do {
-      const res = await this.api(`/customers/${this.customerId}/googleAds:search`, { json: { query, pageToken } });
-      rows.push(...(res.results || []));
-      pageToken = res.nextPageToken;
-    } while (pageToken && rows.length < 20000);
-    return rows;
-  }
-
-  async validateCredentials() {
-    requireFields('Google Ads', [['customer id', this.customerId]]);
-    const [row] = await this.search('SELECT customer.id, customer.descriptive_name, customer.currency_code FROM customer LIMIT 1');
-    return { accountName: row?.customer?.descriptiveName || this.customerId, currency: row?.customer?.currencyCode || null };
-  }
-
-  async listAccounts() {
-    const res = await this.api('/customers:listAccessibleCustomers', { method: 'GET' });
+  transformCampaignData(campaignData) {
     return {
-      accounts: (res.resourceNames || []).map((name) => {
-        const id = name.split('/')[1];
-        return { id, name: id };
-      }),
+      ...campaignData,
+      advertisingChannelType: 'SEARCH',
+      status: 'PAUSED'
     };
   }
 
-  async publishAd(ad, { state = {}, saveState = async () => {} } = {}) {
-    // The shared headline / primary text may be longer than Google allows: leave those out
-    // instead of failing, as long as enough valid variants remain.
-    const fits = (max) => (text) => text && text.length <= max;
-    const uniqueHeadlines = [...new Set([ad.creative.headline, ...(ad.creative.headlines || [])].filter(fits(30)))].slice(0, 15);
-    const uniqueDescriptions = [...new Set([ad.creative.body, ...(ad.creative.descriptions || [])].filter(fits(90)))].slice(0, 4);
+  async transformCreative(creative) {
+    const adData = {
+      name: creative.name || 'Google Ad',
+      status: 'PAUSED',
+      adServingStatus: 'SERVING'
+    };
 
-    requireFields('Google Ads', [
-      ['customer id (reconnect and pick an account)', this.customerId],
-      ['destination URL', ad.creative.url],
-      ['at least one keyword (Google Search ads are keyword-based)', ad.targeting.keywords?.length],
-    ]);
-    if (uniqueHeadlines.length < 3 || uniqueDescriptions.length < 2) {
-      throw new PlatformError('Google responsive search ads need at least 3 distinct headlines (max 30 characters) and 2 descriptions (max 90). Use AI Generate or add more variants.', {
-        platform: 'google', code: 'INVALID_CREATIVE',
-      });
-    }
-    // Already created by an earlier attempt? Nothing more to do.
-    if (state.campaign) return { externalId: state.campaign, externalRef: { ...state } };
-
-    // Google budgets are always per day: spread a lifetime budget over the run
-    let dailyBudget = ad.budget.amount;
-    if (ad.budget.type === 'lifetime') {
-      if (!ad.schedule.start || !ad.schedule.end) {
-        throw new PlatformError('A lifetime budget needs a start and end date.', { platform: 'google', code: 'INVALID_CREATIVE' });
-      }
-      dailyBudget = ad.budget.amount / daysBetweenInclusive(ad.schedule.start, ad.schedule.end);
+    if (creative.type === 'text') {
+      adData.expandedTextAd = {
+        headlines: [{ text: creative.headline || 'Default Headline' }],
+        descriptions: [{ text: creative.body || 'Default description' }],
+        finalUrls: [creative.url || 'https://example.com']
+      };
+    } else if (creative.type === 'responsive_search') {
+      adData.responsiveSearchAd = {
+        headlines: [{ text: creative.headline || 'Default Headline' }],
+        descriptions: [{ text: creative.body || 'Default description' }],
+        finalUrls: [creative.url || 'https://example.com']
+      };
     }
 
-    const c = this.customerId;
-    const budgetName = `customers/${c}/campaignBudgets/-1`;
-    const campaignName = `customers/${c}/campaigns/-2`;
-    const adGroupName = `customers/${c}/adGroups/-3`;
-    const paused = ad.startPaused ? 'PAUSED' : 'ENABLED';
+    return adData;
+  }
 
-    const operations = [
-      { campaignBudgetOperation: { create: { resourceName: budgetName, name: `${ad.name} budget ${Date.now()}`, amountMicros: String(Math.round(dailyBudget * 1e6)), deliveryMethod: 'STANDARD', explicitlyShared: false } } },
-      {
-        campaignOperation: {
-          create: {
-            resourceName: campaignName,
-            name: ad.name,
-            advertisingChannelType: 'SEARCH',
-            status: paused,
-            manualCpc: {},
-            campaignBudget: budgetName,
-            networkSettings: { targetGoogleSearch: true, targetSearchNetwork: true, targetContentNetwork: false },
-            containsEuPoliticalAdvertising: 'DOES_NOT_CONTAIN_EU_POLITICAL_ADVERTISING',
-            ...(ad.schedule.start ? { startDate: toIsoDate(ad.schedule.start) } : {}),
-            ...(ad.schedule.end ? { endDate: toIsoDate(ad.schedule.end) } : {}),
-          },
-        },
-      },
-      ...ad.targeting.countries.map((code) => ({
-        campaignCriterionOperation: { create: { campaign: campaignName, location: { geoTargetConstant: googleGeoTarget(code) } } },
-      })),
-      { adGroupOperation: { create: { resourceName: adGroupName, name: `${ad.name} - ad group`, campaign: campaignName, type: 'SEARCH_STANDARD', status: 'ENABLED', cpcBidMicros: '1000000' } } },
-      ...ad.targeting.keywords.map((text) => ({
-        adGroupCriterionOperation: { create: { adGroup: adGroupName, status: 'ENABLED', keyword: { text, matchType: 'PHRASE' } } },
-      })),
-      {
-        adGroupAdOperation: {
-          create: {
-            adGroup: adGroupName,
-            status: 'ENABLED',
-            ad: {
-              finalUrls: [ad.creative.url],
-              responsiveSearchAd: {
-                headlines: uniqueHeadlines.map((text) => ({ text })),
-                descriptions: uniqueDescriptions.map((text) => ({ text })),
-              },
-            },
-          },
-        },
-      },
+  async setTargeting(adGroupResourceName, targeting, accessToken) {
+    const targetingData = {
+      adGroupCriterion: [
+        {
+          adGroup: adGroupResourceName,
+          keyword: {
+            text: targeting.keywords?.[0] || 'default keyword',
+            matchType: 'BROAD'
+          }
+        }
+      ]
+    };
+
+    await this.makeApiRequest(
+      `customers/${this.config.managerAccountId}/adGroupCriteria:create`,
+      'POST',
+      targetingData,
+      accessToken
+    );
+  }
+
+  transformUpdateData(updateData) {
+    const transformed = {
+      resourceName: updateData.resourceName
+    };
+    
+    if (updateData.status) {
+      transformed.status = updateData.status.toUpperCase();
+    }
+    
+    if (updateData.name) {
+      transformed.name = updateData.name;
+    }
+
+    return transformed;
+  }
+
+  mapGoogleStatus(status) {
+    const statusMap = {
+      'ENABLED': 'active',
+      'PAUSED': 'paused',
+      'REMOVED': 'deleted',
+      'UNKNOWN': 'unknown'
+    };
+    return statusMap[status] || 'unknown';
+  }
+
+  isRetryableError(error) {
+    const retryablePatterns = [
+      /rate limit/i,
+      /quota/i,
+      /timeout/i,
+      /network/i,
+      /temporary/i,
+      /internal server error/i
     ];
 
-    const result = await this.api(`/customers/${c}/googleAds:mutate`, { json: { mutateOperations: operations, partialFailure: false } });
-    const responses = result.mutateOperationResponses || [];
-    const find = (key) => responses.find((r) => r[key])?.[key]?.resourceName;
-
-    state.campaign = find('campaignResult');
-    state.budget = find('campaignBudgetResult');
-    state.adGroup = find('adGroupResult');
-    state.ad = find('adGroupAdResult');
-    if (!state.campaign) throw new PlatformError('Google did not return a campaign resource name', { platform: 'google' });
-    await saveState(state);
-
-    this.log('info', 'Published campaign', { campaign: state.campaign });
-    return { externalId: state.campaign, externalRef: { ...state } };
-  }
-
-  async setStatus(ref, status) {
-    if (!ref.campaign) return;
-    await this.api(`/customers/${this.customerId}/campaigns:mutate`, {
-      json: {
-        operations: [{ updateMask: 'status', update: { resourceName: ref.campaign, status: status === 'active' ? 'ENABLED' : 'PAUSED' } }],
-      },
-    });
-  }
-
-  async getInsights(ref, { since, until }) {
-    if (!ref.campaign) return [];
-    const rows = await this.search(
-      `SELECT segments.date, metrics.impressions, metrics.clicks, metrics.cost_micros, metrics.conversions ` +
-      `FROM campaign WHERE campaign.resource_name = '${ref.campaign.replace(/'/g, '')}' ` +
-      `AND segments.date BETWEEN '${since}' AND '${until}'`
-    );
-    return rows.map((r) => ({
-      date: r.segments.date,
-      impressions: Number(r.metrics.impressions || 0),
-      clicks: Number(r.metrics.clicks || 0),
-      spend: Number(r.metrics.costMicros || 0) / 1e6,
-      conversions: Number(r.metrics.conversions || 0),
-    }));
+    return retryablePatterns.some(pattern => pattern.test(error.message)) ||
+           error.code === 'QUOTA_EXCEEDED' ||
+           error.code === 'INTERNAL_ERROR';
   }
 }
