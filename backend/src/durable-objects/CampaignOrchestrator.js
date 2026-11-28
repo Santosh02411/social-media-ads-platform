@@ -1,5 +1,6 @@
 import { adapterFactory } from '../adapters/AdapterFactory.js';
 import { Log } from '../models/Log.js';
+import { decryptJson } from '../utils/crypto.js';
 
 /**
  * Campaign Orchestrator Durable Object
@@ -317,7 +318,8 @@ export class CampaignOrchestrator {
     const platform = await stmt.bind(platformId).first();
     
     if (platform && platform.config) {
-      platform.config = JSON.parse(platform.config);
+      // Credentials are stored AES-GCM encrypted (plain JSON from older rows still works)
+      platform.config = await decryptJson(this.env.ENCRYPTION_KEY, platform.config, platform.id);
     }
     
     return platform;

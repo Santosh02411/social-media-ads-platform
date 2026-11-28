@@ -1,163 +1,64 @@
+import { getEndpoints } from './endpoints.js';
+import { PlatformError } from './http.js';
+
 /**
- * Base Adapter Interface for Social Media Platforms
- * All platform adapters must implement this interface
+ * Every platform adapter implements this interface.
+ *
+ * `ad` (input to publishAd) is platform-neutral:
+ *   {
+ *     name, objective: 'TRAFFIC' | 'AWARENESS',
+ *     budget:   { amount, type: 'daily' | 'lifetime' },   // major currency units
+ *     schedule: { start: ISO | null, end: ISO | null },
+ *     targeting:{ countries: ['US'], ageMin, ageMax, keywords: [] },
+ *     creative: { headline, body, url, cta, headlines: [], descriptions: [] },
+ *     media:    [{ id, kind: 'image' | 'video', mimeType, name, getBytes(), publicUrl() }],
+ *     startPaused: boolean
+ *   }
+ *
+ * publishAd is resumable: it receives the `state` saved by a previous failed
+ * attempt and calls `saveState(state)` after creating each remote object, so a
+ * retry continues instead of creating duplicates.
  */
 export class BaseAdapter {
-  constructor(config) {
-    this.config = config;
-    this.name = config.name;
-    this.type = config.type;
+  constructor(platform, env) {
+    this.platform = platform;
+    this.cfg = platform.config || {};
+    this.env = env;
+    this.endpoints = getEndpoints(env);
   }
 
-  /**
-   * Connect to the platform
-   * @param {Object} credentials - Platform-specific credentials
-   * @returns {Promise<Object>} Connection result
-   */
-  async connectPlatform(credentials) {
-    throw new Error('connectPlatform method must be implemented');
-  }
+  /** Checks the stored credentials against the real platform. Returns { accountName, currency } or throws PlatformError. */
+  async validateCredentials() { throw new Error('validateCredentials not implemented'); }
 
-  /**
-   * Publish an ad to the platform
-   * @param {Object} adData - Ad campaign data
-   * @returns {Promise<Object>} Publish result
-   */
-  async publishAd(adData) {
-    throw new Error('publishAd method must be implemented');
-  }
+  /** Lists ad accounts (and pages, etc.) the token can use: { accounts: [{id, name}], pages?: [...] }. */
+  async listAccounts() { throw new Error('listAccounts not implemented'); }
 
-  /**
-   * Get status of an ad/campaign
-   * @param {string} externalId - External platform ID
-   * @returns {Promise<Object>} Status result
-   */
-  async getStatus(externalId) {
-    throw new Error('getStatus method must be implemented');
-  }
+  /** Creates the campaign/ad on the platform. Returns { externalId, externalRef }. */
+  async publishAd(ad, ctx) { throw new Error('publishAd not implemented'); }
 
-  /**
-   * Update an existing ad
-   * @param {string} externalId - External platform ID
-   * @param {Object} updateData - Data to update
-   * @returns {Promise<Object>} Update result
-   */
-  async updateAd(externalId, updateData) {
-    throw new Error('updateAd method must be implemented');
-  }
+  /** Activates or pauses what publishAd created. status: 'active' | 'paused'. */
+  async setStatus(ref, status) { throw new Error('setStatus not implemented'); }
 
-  /**
-   * Delete an ad
-   * @param {string} externalId - External platform ID
-   * @returns {Promise<Object>} Delete result
-   */
-  async deleteAd(externalId) {
-    throw new Error('deleteAd method must be implemented');
-  }
+  /** Daily performance rows: [{ date, impressions, clicks, spend, conversions }]. */
+  async getInsights(ref, range) { throw new Error('getInsights not implemented'); }
 
-  /**
-   * Get platform analytics
-   * @param {Object} filters - Analytics filters
-   * @returns {Promise<Object>} Analytics data
-   */
-  async getAnalytics(filters) {
-    throw new Error('getAnalytics method must be implemented');
-  }
-
-  /**
-   * Validate platform credentials
-   * @param {Object} credentials - Platform credentials
-   * @returns {Promise<boolean>} Validation result
-   */
-  async validateCredentials(credentials) {
-    throw new Error('validateCredentials method must be implemented');
-  }
-
-  /**
-   * Get platform-specific ad formats
-   * @returns {Array} Supported ad formats
-   */
-  getSupportedAdFormats() {
-    return ['image', 'video', 'text'];
-  }
-
-  /**
-   * Get platform-specific targeting options
-   * @returns {Array} Available targeting options
-   */
-  getTargetingOptions() {
-    return [
-      'age',
-      'gender',
-      'location',
-      'interests',
-      'behaviors',
-      'custom_audiences'
-    ];
-  }
-
-  /**
-   * Transform campaign data to platform-specific format
-   * @param {Object} campaignData - Standard campaign data
-   * @returns {Object} Platform-specific campaign data
-   */
-  transformCampaignData(campaignData) {
-    // Default implementation - override in specific adapters
-    return campaignData;
-  }
-
-  /**
-   * Handle platform-specific errors
-   * @param {Error} error - Platform error
-   * @returns {Object} Standardized error response
-   */
-  handleError(error) {
-    return {
-      success: false,
-      error: error.message,
-      code: error.code || 'UNKNOWN_ERROR',
-      retryable: this.isRetryableError(error)
-    };
-  }
-
-  /**
-   * Determine if an error is retryable
-   * @param {Error} error - Platform error
-   * @returns {boolean} Whether error is retryable
-   */
-  isRetryableError(error) {
-    const retryableCodes = [
-      'RATE_LIMITED',
-      'TEMPORARY_FAILURE',
-      'NETWORK_ERROR',
-      'TIMEOUT'
-    ];
-
-    return retryableCodes.includes(error.code) || 
-           error.message.includes('rate limit') ||
-           error.message.includes('timeout') ||
-           error.message.includes('network');
-  }
-
-  /**
-   * Get rate limit information
-   * @returns {Object} Rate limit info
-   */
-  getRateLimitInfo() {
-    return {
-      requestsPerSecond: 10,
-      requestsPerHour: 1000,
-      resetTime: null
-    };
-  }
-
-  /**
-   * Log platform activity
-   * @param {string} level - Log level (info, warn, error)
-   * @param {string} message - Log message
-   * @param {Object} context - Additional context
-   */
   log(level, message, context = {}) {
-    console.log(`[${this.name}] ${level.toUpperCase()}: ${message}`, context);
+    // Context must never contain credentials
+    console.log(`[${this.platform.type}] ${level.toUpperCase()}: ${message}`, context);
   }
+}
+
+/** Throws a clear error when a creative is missing something the platform requires. */
+export function requireFields(platformLabel, checks) {
+  const missing = checks.filter(([, value]) => !value).map(([label]) => label);
+  if (missing.length > 0) {
+    throw new PlatformError(`${platformLabel}: missing ${missing.join(', ')}`, { code: 'INVALID_CREATIVE', retryable: false });
+  }
+}
+
+export const toIsoDate = (iso) => new Date(iso).toISOString().slice(0, 10);
+
+export function daysBetweenInclusive(startIso, endIso) {
+  const ms = new Date(endIso).setUTCHours(0, 0, 0, 0) - new Date(startIso).setUTCHours(0, 0, 0, 0);
+  return Math.max(1, Math.round(ms / 86400000) + 1);
 }
